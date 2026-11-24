@@ -30,6 +30,24 @@ Whatever the details below, two things are always true:
   backup from three months ago is exactly as easy, and as complete, as restoring
   last night's.
 
+## What a backup does *not* carry
+
+If you import your captures by **reference** (the default — see
+[Ingest](ingest.md)), the frames live in your own folder, not in M110's library.
+A backup copies what is *in* the library, so it carries:
+
+- everything M110 owns — your journals, plans, the stacks and renders you
+  imported, the settings;
+- the **links** to your referenced originals (the `content.toml` beside each
+  object) — so a restore brings back the library, pointing at the same files.
+
+It does **not** carry the referenced files themselves. The Backup pane says so,
+with the number of files and how much they weigh, so "my library is backed up"
+never quietly stops meaning "my frames are backed up". Backing those up is your
+job — and the folder they sit in (the telescope's card, your captures folder) is
+the thing to copy. The **Essentials** scope is the honest choice for a cloud
+backup: it is the catalog and the hand-made work, without the bulk.
+
 ## Two ways to store backups
 
 Some destinations can *share* a file between backups — that is, record "this backup

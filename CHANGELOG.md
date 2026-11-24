@@ -10,6 +10,39 @@ changes a **user** would notice, per release.
 
 ## [Unreleased]
 
+### Added
+- **Import without copying — your captures stay where they are.** Importing from
+  the telescope, a card or any folder now **references** your files instead of
+  copying them: M110 keeps a link to the original and the Library grows by
+  nothing. Your library costs half the disk it used to, and the files on your
+  telescope are never modified, renamed or moved. The Import page shows what each
+  row will do ("reference" or "copy") and you can change it per row; the
+  default lives in **Settings → Import → Keep imported files**.
+- **Rejecting a sub no longer moves a file.** Under the new model, excluding a
+  sub from processing is a change of record, not a move: the original stays
+  exactly where it is.
+- **You are told when an original is not where it was.** If a referenced file
+  can't be found — the telescope is unplugged, the card is in another drawer —
+  the Import page says how many are missing and offers **Reconnect…**, which
+  re-points the links at wherever the folder turned up.
+- **A backup says what it does not carry.** Referenced files live outside the
+  Library, so a backup carries the links to them and not the files. The Backup
+  pane now states how many files (and how much) that is, so "my library is
+  backed up" never quietly stops meaning "my frames are backed up".
+
+### Changed
+- **Importing is "reference" by default.** A file from outside the Library is
+  referenced (nothing copied) unless you ask for a copy. Files you already
+  imported are untouched: the store keeps them exactly as they are. The Inbox
+  holding area still holds a real copy, because a file waiting for you to say
+  what it is has to be somewhere M110 can move it from.
+- **A processing tool never hardlinks your own files.** Frames that live
+  outside the Library are **copied** into the Siril/AstroWizard working folder
+  instead of linked, so a tool that writes in place cannot touch your original.
+- The store's layout version is now 7. A store that holds referenced content
+  means something an older M110 cannot read, so backups from a newer store are
+  refused rather than half-restored.
+
 ## [1.0.0-beta.1] - 2026-11-23
 
 ### Changed

@@ -606,6 +606,13 @@ def build(out: Path):
     # ---- An external import source to Browse→Import (ships beside the store) ----
     _build_import_source(out.parent / f"{out.name}-import-source")
 
+    # ---- A target imported BY REFERENCE: its subs stay in the import-source
+    # folder and the store keeps only the link to them (the Lightroom model).
+    # The tester can see the manifest beside the object, the "referenced"
+    # state in the library, and — if they move that folder away — the
+    # "original not found" warning on the Import page.
+    _referenced_target(out.parent / f"{out.name}-import-source", C("m27"))
+
     # ---- A fake mounted telescope, for the #110 no-re-sync check (ships beside
     # the store). Built AFTER the rejection above so it carries the rejected frames.
     _build_device_mount(out.parent / f"{out.name}-device-mount")
@@ -667,6 +674,34 @@ def _nfs_sidecars(out: Path):
     for v in victims:
         assert v.is_file(), f"sidecar victim missing: {v}"
         (v.parent / f"._{v.name}").write_bytes(_APPLEDOUBLE)
+
+
+def _referenced_target(src_root: Path, coords: tuple[float, float]):
+    """One target whose subs live **outside** the store and are referenced, not copied.
+
+    The Lightroom model in the corpus: the bytes stay in the import-source
+    folder, the store keeps the wrapper (the `content.toml` beside the object),
+    and nothing is duplicated. A tester who moves that folder away sees the
+    "original not found" warning and the **Reconnect…** that fixes it.
+    """
+    from m110 import content, ingest
+    ra, dec = coords
+    src = src_root / "M 27_sub"
+    src.mkdir(parents=True, exist_ok=True)
+    when = datetime(2026, 5, 26, 1, 0, 0)
+    for i in range(2):
+        _fits(src / f"Light_M27_30.0s_LP_20260526-01010{i}.fit",
+              "M 27", ra, dec, 30.0, "LP", when + timedelta(minutes=10 * i), 7600 + i)
+    ops = ingest.scan_source_plan(src)      # just this folder, not the whole source
+    assert ops and all(o.action == "reference" for o in ops), \
+        "the corpus's referenced target must be planned as a reference"
+    ingest.apply_ops(ops)
+    target = ops[0].object
+    refs = content.list_target_tier(target, "lights")
+    assert len(refs) == 2 and all(r.referenced for r in refs), \
+        "the corpus's referenced target must be in the store as a reference"
+    assert not list(config.lights_dir(target).glob("*.fit")), \
+        "a referenced target must not have copies in the store"
 
 
 def _build_import_source(src: Path):
@@ -936,6 +971,20 @@ def verify(out: Path):
     sessions = scan_sessions.scan()
     objs = {s["object_dir"] for s in sessions}
     print(f"  sessions parsed: {len(sessions)} across {len(objs)} folders {sorted(objs)}")
+
+    # The **referenced** target (M27): the store holds the link, not the bytes,
+    # and every consumer reads it as if it were there.
+    from m110 import backup, content
+    refs = content.list_target_tier("M27", "lights")
+    assert len(refs) == 2 and all(r.referenced for r in refs), \
+        "the referenced target's subs must be links, not copies"
+    assert not list(config.lights_dir("M27").glob("*.fit")), \
+        "a referenced target must not hold copies of the frames"
+    assert "M27" in objs, "a referenced target must produce a session like any other"
+    # …and the backup says out loud what it does not carry.
+    count, size = backup.referenced_originals(config.DATA_ROOT)
+    assert count == 2 and size > 0, "the backup must report the referenced originals"
+    print(f"  referenced target M27: 2 frame(s) linked, {size} B not in the backups")
 
     # 2nd device: M42 captured with a Dwarf 3 → `.fits` lights + stacked-16 stack.
     m42_lights = sorted(config.lights_dir("M42").glob("*.fits"))

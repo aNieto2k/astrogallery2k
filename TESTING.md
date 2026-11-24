@@ -556,6 +556,29 @@ On **cocoa**, against the test corpus.
       confirming, no `Images/<device>/` target appears, and re-importing offers nothing.
 - [ ] Pointing Import at the app's **own `Images/` tree** finds **nothing** to import.
 
+#### Import — reference mode (the originals stay where they are)  ⚙ *(automated — `test_content_references.py`, `test_content.py`)*
+- [ ] Import a folder of subs from **outside** the store: the preview's **Store**
+      column reads **reference** by default and the summary says **"nothing
+      copied"**. After importing, `Images/<target>/lights/` is **empty** and
+      `Images/<target>/content.toml` exists — the link, not the frames.
+- [ ] The original files are **untouched**: same names, same mtime, same folder.
+      Nothing was renamed or moved.
+- [ ] Refresh → the target has a **session**, the object is in the Library, and the
+      integration counts exactly as it would for a copied import.
+- [ ] Switch one row's **Store** to **copy** → the summary says how much it will
+      copy and the confirmation dialog says **"Copy N file(s) … into the
+      collection?"**; after importing, the frames are in the store.
+- [ ] **Reject** a referenced sub (move it to `rejected/` by hand): the original
+      does **not** move, and the sub stops counting toward the integration.
+- [ ] **Move the source folder away** → the Import page says how many referenced
+      originals are not where they were, and **Reconnect…** re-points them at the
+      new location (the library works again, nothing was copied).
+- [ ] **Settings → Backup** states how many referenced files (and how much) are
+      **not** in the backups. A backup of the store contains the manifest and not
+      the frames.
+- [ ] A workflow sandbox (Siril) holds a **copy** of a referenced frame, not a
+      hardlink: the inode differs and the original's mtime is unchanged.
+
 #### Import — holding area + manual assign  (6c)  ⚙ *(sweep/assign automated — `test_ingest.py`, `test_ui_ingest.py`)*
 - [ ] Import a messy folder containing a **headerless `.fit`** and a **stray `.jpg`**
       (not in a recognized folder): they appear in the preview as **"→ holding area"**

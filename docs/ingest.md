@@ -13,8 +13,12 @@ will land. Device layouts are recognized automatically — a Seestar export, a D
 
 - Check or uncheck groups; retarget a group to a different object if the name or
   pointing looks off.
-- Nothing is written until you click **Import**. From a telescope, M110 **copies**
-  (your device is left untouched); from a staging folder it can move.
+- Nothing is written until you click **Import**. From a telescope, M110
+  **references** your files (see below); from a staging folder it can move.
+- The **Store** column says what happens to each group: **reference** (the
+  files stay where they are and M110 keeps a link — nothing is copied) or
+  **copy** (they are copied into your library). Change it per row; the default
+  is in **Settings → Import → Keep imported files**.
 - Files M110 can't confidently classify go to a **holding area** (the `Inbox/`
   folder) where you assign them by hand — it never silently drops or misfiles a
   frame. The holding panel **suggests** an object and kind from each file's header
@@ -23,6 +27,36 @@ will land. Device layouts are recognized automatically — a Seestar export, a D
 
 M110 reads the FITS headers to identify each frame (object, date, exposure, filter,
 pointing), so it works across devices regardless of their filename conventions.
+
+### Referencing instead of copying
+
+By default M110 does **not** copy your captures into the library. It keeps a
+**link** to the file where it already is — on the telescope, on the card, in
+your own folder — and records what that file *is* in a small `content.toml`
+beside the object it belongs to.
+
+What that buys you:
+
+- **Half the disk.** A night of subs is copied zero times, and a backup of
+  your library no longer carries a second copy of every frame.
+- **Your originals are yours.** M110 opens them read-only and never renames,
+  moves or rewrites them. Rejecting a sub from processing is a change of
+  record, not a move of the file.
+- **The library stays light** and the heavy stuff stays where your backup
+  already reaches it.
+
+What it costs, so there are no surprises:
+
+- **The library is no longer self-contained.** If you delete the original or
+  unplug the volume it lives on, M110 cannot open it. The Import page says
+  how many are missing, and **Reconnect…** re-points the links when the
+  folder turns up somewhere else.
+- **Backups carry the links, not the frames.** The Backup pane says how many
+  files (and how much) that is. Backing up the originals is your job — the
+  folder they sit in is the thing to copy.
+
+Files you already imported keep living in the library exactly as they are;
+this only changes what a *new* import does.
 
 ### The Seestar's dark library
 
@@ -90,6 +124,7 @@ Your data folder is organized around **two views of the same collection**:
   Objects/<catalog id>/       one folder per catalog object (M101, C20, …)
     journal.md                  your notes for that object
   Images/<target>/            one folder per capture target
+    content.toml                 the links to your originals (when referenced)
     lights/                     raw light subs — the immutable originals
     stacks/                     Siril stacks you've imported back
     device-stacks/              the telescope's own in-app stacks
@@ -116,7 +151,8 @@ finished renders in separate folders on purpose:
 
 - `lights/` holds **only** raw light subs. M110 treats these as immutable — it reads
   them but never writes into this folder. This is what everything else is derived
-  from, so keep it clean.
+  from, so keep it clean. (With *reference* mode the folder can be empty: the
+  subs are still listed by M110, they just live in your own folder.)
 - `stacks/` and `device-stacks/` hold integrated stacks (yours from Siril, and the
   telescope's own in-app stacks — Seestar, Dwarf or Draco — respectively).
   (Older versions called it `seestar-stacks/`; M110 renames it for you.)

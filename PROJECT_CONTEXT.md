@@ -62,7 +62,11 @@ El venv es **compartido** y el install editable apunta al checkout principal. De
 
 | Acoplamiento | Dónde | Por qué importa |
 |---|---|---|
-| **Escritura en el árbol de contenido** | `ingest.apply_ops` (`ingest.py:1736`) — único escritor en `Images/` | Toda escritura es **preview-then-confirm**: `scan_*_plan()` (solo lectura) → `apply_ops()` (escritor único) tras confirmación del diálogo. Guard de contención: el dest debe resolver dentro de `DATA_ROOT`. |
+| **El contenido puede vivir FUERA del store** | `m110/content.py` (el seam) | Un frame puede ser una **referencia**: los bytes se quedan donde el usuario los tiene y el store guarda un puntero en `Images/<target>/content.toml`. Por eso **nunca se enumera el árbol de contenido directamente**: se pregunta a `content.list_tier()` / `content.list_owner()` y se abre `ref.origin`. Un consumidor que abra `DATA_ROOT / rel` no encuentra nada para un fichero referenciado, y el fallo es silencioso. |
+| **El manifiesto no es datos derivados** | `m110/content.py` | Es el único enlace a un fichero que el store no posee → vive en el eje **visible** (nunca en `.m110_internal_data/`, que es desechable). Un solo escritor: `content.add()` / `content.save()`. Borrarlo deja huérfano cada frame que nombra. |
+| **Un hardlink a un sandbox sólo apunta a lo nuestro** | `roundtrip.link_sandbox_input` | Un original referenciado es un fichero **del usuario**: se **copia** al sandbox, nunca se enlaza (un hardlink daría a la herramienta un segundo nombre del suyo, y una herramienta que escribe in-place modificaría su original). |
+| **El backup lleva los enlaces, no los frames** | `backup/scope.referenced_originals` | El manifiesto está en el store (va al snapshot); los originales referenciados no (se quedan fuera). El panel de Backup lo dice con la cifra — ese número nunca debe descartarse en silencio. |
+| **Escritura en el árbol de contenido** | `ingest.apply_ops` (`ingest.py:1736`) — único escritor en `Images/` | Toda escritura es **preview-then-confirm**: `scan_*_plan()` (solo lectura) → `apply_ops()` (escritor único) tras confirmación del diálogo. Guard de contención: el dest debe resolver dentro de `DATA_ROOT`. Tres acciones: `move` (ya es nuestro), `copy`, `reference` (por defecto: el fichero se queda donde está). |
 | **Copiar = bytes, no metadatos** | `shutil.copyfile` (no `copy2`) + `.part` → `os.replace` | Copiar flags/xattrs desde un Seestar SMB lanza `EPERM` en macOS. `copy2` solo se usa en `assistant/client_config.py`. |
 | **Hardlinks** | `roundtrip.link_or_copy` (`roundtrip.py:75`) — sandboxes Siril/AstroWizard + `backup/mirrored.py` | El ingest **nunca** hace hardlink. Los hardlinks de sandbox están excluidos de backup vía `config.SANDBOX_LINKED_INPUTS`. |
 | **Caminos persistidos** | root-relativos: `derived/images.json` (`src`/`full`), `.m110_internal_data/renders/hero/<slug>.src`, `derived/devices.json` (`rel`/`preview`/`lights_rel`), `siril/.m110_calibration.json` (`library`); absolutos: manifests de backup (`source_root`), `backup/hashcache.py` (clave = path absoluto), `~/.m110/settings.json` (`data_root`) | Un cambio de raíz/ruta rompe estos → usar `config.upgrade_legacy_rel()` en los 3 sitios de lectura (`derived.py:100`, `build_images.py:209/226`). |
@@ -77,7 +81,8 @@ El venv es **compartido** y el install editable apunta al checkout principal. De
 
 | Módulo | Responsabilidad |
 |---|---|
-| `config.py` | Resolución del data root, bootstrap/seed, **helpers de ruta** (la autoridad), settings, detección de montaje Seestar, `is_fits_file`/`is_hidden_name`/`is_light_frame`, registro de sandboxes |
+| `config.py` | Resolución del data root, bootstrap/seed, **helpers de ruta** (la autoridad), settings, detección de montaje Seestar, `is_fits_file`/`is_hidden_name`/`is_light_frame`, registro de sandboxes, `CONTENT_TIERS` |
+| `content.py` | **La capa de contenido**: el índice del store de lo que vive FUERA de él. `ContentRef` (un tipo único para contenido gestionado y referenciado), el manifiesto `content.toml` por propietario (lectura/escritura, un solo escritor), `list_tier()`/`list_owner()`, `resolve_path()` (ruta lógica → fichero real), `move_to_tier()` (rechazar un sub = cambio de registro), `health_all()`/`relink()` (originales desaparecidos), `free_name()` |
 | `migrate.py` | Migración idempotente in-place del store (`STORE_VERSION = 6`); `_rename_device_stacks`, `_reshape_v0_to_v2` |
 | `ingest.py` | **Escaneo read-only del plan** (`scan_directory_plan`, layouts Seestar/Dwarf/N.I.N.A./raw/store/calibration) + `apply_ops` (único escritor), holding area en `Inbox/`, canonicalización de target (`canonical_target`), alias table |
 | `scan_sessions.py` | `Images/<t>/lights/` → `sessions.jsonl` (rollup por noche/dispositivo/filtro) |
@@ -136,17 +141,20 @@ El venv es **compartido** y el install editable apunta al checkout principal. De
 ### 4.5 Gotchas de alto impacto (resumen; el detalle está en `CLAUDE.md`/DONE.md)
 
 1. **Nunca escribir en el árbol de contenido sin confirmación explícita** — todo es `scan_*_plan()` → `apply_ops()`.
-2. **`.fit` y `.fits`**: usar siempre `config.is_fits_file`, nunca un check de sufijo pelado (rechaza los `._` AppleDouble, #161).
-3. **Los sub del *app* de Seestar ya están restados de dark en el dispositivo** — la bandera `darks_applied` es **por frame**, no por modelo.
-4. **Los facts de captura vienen de la cabecera**, nunca del nombre de fichero.
-5. **Caminar saltando `lights/`/sandboxes se poda en el directorio** (`roundtrip._walk_files`), nunca `rglob` + filtro.
-6. **Nunca confiar en mtime** para procedencia/frescura (el mtime de un ingest es el de la copia) → cabeceras (`DATE-OBS`, `DATE`).
-7. **Opciones de Siril con quotes de token completo**: `"-dark=<path>"`; `-dark="<path>"` deja las comillas en el nombre y falla.
-8. **La calibración de Siril va en cada job dir** (`siril/<FILTER>/darks/`), no solo en la raíz del sandbox.
-9. **El motor es Qt-free** (nada de `PySide6` en `m110/*.py`).
-10. **Los tests nunca tocan datos reales** — `conftest.py` sella `M110_DATA_ROOT` + `config.*` + `SETTINGS_FILE` + `APP_CONFIG_DIR` por sesión.
-11. **El harness de test manual viaja con el cambio** (`tools/make_test_corpus.py` + `create_test_harness.sh` en el mismo commit).
-12. **Cierre de cada cambio**: `pytest -q` verde + docs actualizados (`ROADMAP`/`BUGS`/`DATA_MODEL`/`TESTING`/`CHANGELOG [Unreleased]`/`DONE`) en el **mismo commit**.
+2. **El contenido puede vivir FUERA del store.** Nunca enumerar el árbol de contenido directamente: `content.list_tier()` / `content.list_owner()`, y abrir `ref.origin`. `content.resolve_path()` es el único resolutor (nunca `DATA_ROOT / rel` a mano) — el fallo sería silencioso.
+3. **Un hardlink a un sandbox sólo apunta a lo nuestro** — `roundtrip.link_sandbox_input` copia los originales referenciados (el fichero es del usuario).
+4. **El backup lleva los enlaces, no los frames** — `backup.scope.referenced_originals()` lo cuenta y el panel de Backup lo dice con la cifra.
+5. **`.fit` y `.fits`**: usar siempre `config.is_fits_file`, nunca un check de sufijo pelado (rechaza los `._` AppleDouble, #161).
+6. **Los sub del *app* de Seestar ya están restados de dark en el dispositivo** — la bandera `darks_applied` es **por frame**, no por modelo.
+7. **Los facts de captura vienen de la cabecera**, nunca del nombre de fichero.
+8. **Caminar saltando `lights/`/sandboxes se poda en el directorio** (`roundtrip._walk_files`), nunca `rglob` + filtro.
+9. **Nunca confiar en mtime** para procedencia/frescura (el mtime de un ingest es el de la copia) → cabeceras (`DATE-OBS`, `DATE`).
+10. **Opciones de Siril con quotes de token completo**: `"-dark=<path>"`; `-dark="<path>"` deja las comillas en el nombre y falla.
+11. **La calibración de Siril va en cada job dir** (`siril/<FILTER>/darks/`), no solo en la raíz del sandbox.
+12. **El motor es Qt-free** (nada de `PySide6` en `m110/*.py`).
+13. **Los tests nunca tocan datos reales** — `conftest.py` sella `M110_DATA_ROOT` + `config.*` + `SETTINGS_FILE` + `APP_CONFIG_DIR` por sesión.
+14. **El harness de test manual viaja con el cambio** (`tools/make_test_corpus.py` + `create_test_harness.sh` en el mismo commit).
+15. **Cierre de cada cambio**: `pytest -q` verde + docs actualizados (`ROADMAP`/`BUGS`/`DATA_MODEL`/`TESTING`/`CHANGELOG [Unreleased]`/`DONE`) en el **mismo commit**.
 
 ### 4.6 Flujo de entrega (GitLab/GitHub)
 

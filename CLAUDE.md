@@ -119,7 +119,8 @@ DONE.md's archived reference — grep the module name there.
 
 | Module | Role |
 |---|---|
-| `config.py` | data-root resolution + bootstrap/seed, per-target path helpers, settings, Seestar mount detection (`VOLUMES_DIR`), `FIT_EXTS`/`is_fits_file`, `rejected_dir`, `SANDBOX_LINKED_INPUTS`/`SANDBOX_DIRNAMES` (the one registry of workflow sandboxes), `SANDBOX_SCRATCH` (tool scratch: not archived, not backed up) |
+| `config.py` | data-root resolution + bootstrap/seed, per-target path helpers, settings, Seestar mount detection (`VOLUMES_DIR`), `FIT_EXTS`/`is_fits_file`, `rejected_dir`, `SANDBOX_LINKED_INPUTS`/`SANDBOX_DIRNAMES` (the one registry of workflow sandboxes), `SANDBOX_SCRATCH` (tool scratch: not archived, not backed up), `CONTENT_TIERS` (the tiers a target holds) |
+| `content.py` | **the content layer**: the store's index of content that lives outside it. `ContentRef` (one type for managed *and* referenced content), the per-owner `content.toml` manifest (read/write, one writer), `list_tier()`/`list_owner()` (enumerate both kinds), `resolve_path()` (a logical store path → the real file), `move_to_tier()` (reject a sub = a change of record, not of the file), `health_all()`/`relink()` (originals that went missing), `free_name()`. Every consumer of the content tree goes through here |
 | `migrate.py` | in-place idempotent store migration (two-axis layout; v5 marks the retired `priorities.toml` as unread) |
 | `catalog.py` | Library (`library.toml`) vs bundled reference/catalog lists; add/remove/enrich entries; `season_from_ra`; `object_identifiers`; Simbad via optional astroquery (`OnlineLookupError`) |
 | `derived.py` | read generated rollups (`derived/*.json`) |
@@ -128,11 +129,11 @@ DONE.md's archived reference — grep the module name there.
 | `build_derived.py` | totals/priorities/summary/processing/goals JSON; `deep_threshold`; per-model `by_model` + the three-state `status` (rolled up to the most advanced model) |
 | `integration_goals.py` | integration goals per (object, telescope model): `integration_goals.toml` (`set_goal`/`clear_goal`), `model_key` (preset, else device key), `speed_factor` = (f/f_S50)², `default_goal`, `resolve`, `state` (Initial <25% · in progress · deep), `rollup`, `capture_report` (assistant) |
 | `build_images.py` | thumbnails + heroes + `images.json`, content-hash cached; hero keyed on source identity (`.src` sidecar) |
-| `ingest.py` | read-only scan **plan** (`scan_directory_plan`, recursive, layout registry incl. Seestar + Dwarf 3 + N.I.N.A. + store-shaped `calibration`) + gated `apply_ops` (the only writer); holding area (collision-safe `_hold_names`) + identification aids; kinds `cal-*` → `Calibration/<device>/` |
+| `ingest.py` | read-only scan **plan** (`scan_directory_plan`, recursive, layout registry incl. Seestar + Dwarf 3 + N.I.N.A. + store-shaped `calibration`) + gated `apply_ops` (the only writer); holding area (collision-safe `_hold_names`) + identification aids; kinds `cal-*` → `Calibration/<device>/`; **three actions** — `move` (already ours), `copy`, `reference` (the default: the file stays where it is and the store keeps a pointer to it) |
 | `capture_profiles.py` | which capture software wrote a frame (#203), from header cards only: built-in `CaptureProfile`s (`nina`, `seestar-app`, `dwarf-app`, `generic`) → `device_key` (N.I.N.A.'s S50 serial from `INSTRUME`), `darks_applied` (**per frame, by capture path**), `object_name` (panel → `<obj>_mosaic`), `filter_name` (N.I.N.A.'s Seestar `IR` → `IRCUT`), `facts(hdr)`; every header reader takes device/flag/filter from here |
 | `devices.py` | telescope identity from `TELESCOP`: `folder_name` (verbatim = the device key), `preset_key` (→ `DEVICE_PRESETS`), `display_name`, `darks_applied_on_device` (Seestar); the registry `devices.toml` (`load_registry`/`save_device`: nickname, retired, preset) + `label`/`model_name`/`serial` |
 | `calibration.py` | header-only matching of lights to the device master library (masters + `raw_sets` of raw frames, `MatchResult.files()`): `library`, `match_masters` (dark = EXPTIME/GAIN/XBINNING + nearest CCD-TEMP; bias = binning, prefer gain; flat = binning + unambiguous filter, `FILTER_INDEX`), `match_for_target` (mixed settings or two telescopes refused), `facts_from_frames` (the stacker's entry); never matches a dark for a `darks_applied_on_device` telescope. Seestar rule v2: `device_clock` (the ONE filename-clock parser), `applied_dark` (run start) + `applied_darks` (sticky 2.5 °C mid-run switch), `split_runs`; `master_stats` + `device_rollup` → `derived/devices.json` |
-| `roundtrip.py` | tool-neutral half of a processing sandbox: classify, keep-both collision handling, `scan_finished`/`apply_import`/`archive_run`, `prune_archives` (keep-N, name-parsed only), the `Sandbox` descriptor; the run guard (`RUN_MARKER`, `stack_in_progress`, `require_idle`, `sandbox_busy`) |
+| `roundtrip.py` | tool-neutral half of a processing sandbox: classify, keep-both collision handling, `scan_finished`/`apply_import`/`archive_run`, `prune_archives` (keep-N, name-parsed only), the `Sandbox` descriptor; the run guard (`RUN_MARKER`, `stack_in_progress`, `require_idle`, `sandbox_busy`); **`link_sandbox_input`** (hardlink a frame we own, **copy** one that is a referenced original) |
 | `siril.py` | prepare-and-guide round-trip: `plan_prep`/`apply_prep` (hardlinked `lights/`; calibration = the target's own frames else a library match **per filter**, linked **per job dir**; a filter needing different calibration per subset is split into job folders, recorded in `siril/.m110_jobs.json` → `job_group`; the masters manifest `siril/.m110_calibration.json` for Stackhammer (`calibration_manifest`/`read_manifest`); Naztronomy preset preserved once hand-edited), `autoprep`, import delegations over `SANDBOX`, `prune_rejected`, `working_dirs` |
 | `astrowizard.py` | the finishing round-trip (thin `roundtrip` consumer): `is_master`/`is_autosave`/`is_handoff` (sidecar-keyed, never filename), `prepare_lights` |
 | `stacking.py` | headless Siril stacking (`m110-stack`): `build_plan` (read-only) vs `run_siril`; per-subset calibration (`calibration_subsets` → select/calibrate `-prefix`/`merge`) and masters built from raw sets; three-phase solve·register·stack; `calibration_for_stack` (job-dir masters, else the device library on the *selected* frames → `calibrate -dark/-flat/-bias`; `--no-calibration`); `clear_scratch`; `apply_handoff`, `handoff_candidates`, `_is_stretched` (HISTORY cards) |
@@ -273,6 +274,27 @@ wrong) is under the same heading in DONE.md's archived reference.
   `lsappinfo list`, not the spec.
 
 **Data & files**
+- **Content can live OUTSIDE the store.** A frame may be a *reference*: the
+  bytes stay where the user has them (on the telescope, in their folder) and
+  the store keeps a pointer in `Images/<target>/content.toml`. So **never
+  enumerate the content tree directly** — ask `content.list_tier()` /
+  `content.list_owner()`, and open `ref.origin`, never a path built by joining
+  `DATA_ROOT` with a recorded relative path (`content.resolve_path()` is the
+  one resolver). A consumer that opens `DATA_ROOT / rel` finds nothing for a
+  referenced file, and the failure is silent.
+- The **manifest is not derived data**: it is the only link to a file the store
+  does not own. It lives in the *visible* axes (never `.m110_internal_data/`,
+  which is documented as disposable), and deleting it orphans every frame it
+  names. One writer: `content.add()` / `content.save()`.
+- **A hardlink into a sandbox must only ever point at a frame we own.** A
+  referenced original is the *user's* file: `roundtrip.link_sandbox_input`
+  copies it instead of linking it, because a hardlink would hand a tool a
+  second name for it — and a tool that writes in place would then modify the
+  user's own data.
+- **The backup carries the links, not the frames.** The manifest is a file in
+  the store (so it is in the snapshot); the referenced originals are outside it
+  (so they are not). `backup.scope.referenced_originals()` counts them and the
+  Backup pane says so — that number must never be quietly dropped.
 - FITS extensions are `.fit` **and** `.fits` — always via `config.is_fits_file`, never a bare suffix check: it also rejects the `._` AppleDouble sidecars a Mac leaves on NFS/SMB (#161). Any new store enumeration skips `config.is_hidden_name` names.
 - Session facts come from the FITS **header**, not filenames (device conventions differ).
 - **Seestar *app* subs are already dark-subtracted on the device**; the same S50 under
