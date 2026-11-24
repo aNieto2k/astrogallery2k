@@ -158,6 +158,19 @@ def test_the_backup_carries_the_links_but_not_the_frames(store, tmp_path):
     assert "Images/M51/content.toml" in rels
 
 
+def test_a_copy_does_not_land_on_a_referenced_name(store, tmp_path):
+    """The two modes must not fight over a name: a referenced item holds its
+    logical name even though no file sits at that path."""
+    src = _night(tmp_path)
+    ingest.apply_ops(ingest.scan_source_plan(src))
+    assert content.list_target_tier("M51", "lights")
+
+    # now import the same night as a COPY: the name is taken by the reference
+    ops = ingest.scan_source_plan(src, action="copy")
+    assert ops == [], "a copy must not land on a name a reference already holds"
+    assert len(content.list_target_tier("M51", "lights")) == 3
+
+
 def test_a_copied_import_still_copies(store, tmp_path):
     """The other mode is untouched: an explicit copy behaves exactly as before."""
     src = _night(tmp_path)

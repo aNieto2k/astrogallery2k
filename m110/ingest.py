@@ -748,6 +748,17 @@ def _light_tier_names(obj: str) -> set[str]:
             | set(_all_files(config.rejected_dir(obj))))
 
 
+def _claimed_names(dst_dir: Path) -> set[str]:
+    """The names already taken in a tier — the files it holds **and** the
+    referenced items that claim a name without occupying one."""
+    logical = content.logical_path(dst_dir)
+    if not logical:
+        return set(_all_files(dst_dir))
+    owner = content.owner_of(logical)
+    tier = content.tier_of(logical)
+    return {r.name for r in content.list_tier(owner, tier)}
+
+
 def _emit_one_kind(src_dir: Path, files, kind: str, obj: str, group: str,
                    action: str, layout: str, source_name: str = "") -> list[IngestOp]:
     """Route `files` into the single target subdir for `kind` (skip already-present)."""
@@ -764,8 +775,15 @@ def _emit_one_kind(src_dir: Path, files, kind: str, obj: str, group: str,
         tiers = ("lights", "rejected") if kind in _LIGHT_TIERS else (tier,)
     else:
         referenced = set()
-        existing = (_light_tier_names(obj) if kind in _LIGHT_TIERS
-                    else set(_all_files(dst_dir)))
+        # The names already claimed in that tier — the files **and** the
+        # referenced items: a copy landing on a referenced name would give the
+        # library two entries with one name. The two sub tiers count as one
+        # population, exactly as they do in reference mode.
+        if kind in _LIGHT_TIERS:
+            existing = (_claimed_names(config.lights_dir(obj))
+                        | _claimed_names(config.rejected_dir(obj)))
+        else:
+            existing = _claimed_names(dst_dir)
     new_object = kind not in _CAL_KINDS and not config.target_dir(obj).is_dir()
     ops: list[IngestOp] = []
     for f in files:
@@ -1031,7 +1049,7 @@ def _emit_media(src_dir: Path, files, category_dir: str, obj_label: str,
     if action == "reference":
         existing: set[str] = set()
     else:
-        existing = set(_all_files(dst_dir))
+        existing = _claimed_names(dst_dir)
     ops: list[IngestOp] = []
     for f in files:
         handled.add(f)
