@@ -164,9 +164,9 @@ def test_a_header_cache_from_before_capture_profiles_heals(tmp_path, monkeypatch
     sub = nina_frame(config.lights_dir("M110") / "a.fits")
     cache_file = config.DERIVED_DIR / "session_headers.json"
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps({"M110/a.fits": {
+    cache_file.write_text(json.dumps({"Images/M110/lights/a.fits": {
         "size": sub.stat().st_size, "telescop": "S50 Prime", "gain": 80,
         "binning": 1, "temp_c": 12.0}}))
     (row,) = scan_sessions.scan()
     assert row["device"] == "S50_15e7e390" and row["capture"] == "nina"
-    assert json.loads(cache_file.read_text())["M110/a.fits"]["capture"] == "nina"
+    assert json.loads(cache_file.read_text())["Images/M110/lights/a.fits"]["capture"] == "nina"

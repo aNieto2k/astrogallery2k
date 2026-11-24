@@ -29,7 +29,7 @@ import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import calibration, config, devices, roundtrip
+from . import calibration, config, content, devices, roundtrip
 
 _log = logging.getLogger("m110")
 
@@ -276,12 +276,15 @@ def _lights(target: str) -> list[Path]:
     happens to sit in ``lights/`` is ignored, so it can never
     be misread as an extra filter (the phantom ``OTHER`` job) or padded into a
     stack. Defense-in-depth partner to the import guard that keeps such files
-    out of ``lights/`` in the first place."""
-    d = config.lights_dir(target)
-    if not d.is_dir():
-        return []
-    return sorted(f for f in d.iterdir()
-                  if f.is_file() and config.is_light_frame(f.name))
+    out of ``lights/`` in the first place.
+
+    The subs may live outside the store (referenced originals, out on the
+    telescope); what comes back is where the bytes are, so the caller opens the
+    right file — and `roundtrip.link_sandbox_input` copies rather than hardlinks
+    them, so the user's originals stay untouched.
+    """
+    return sorted(Path(r.origin) for r in content.list_target_tier(target, "lights")
+                  if config.is_light_frame(r.name))
 
 
 # The calibration tiers, in the order the Naztronomy preset toggles them, and the
@@ -294,12 +297,10 @@ def _calib_frames(target: str) -> dict[str, list[Path]]:
     """Calibration frames (`.fit`/`.fits`) present for `target`, keyed by tier
     (`darks`/`flats`/`biases`); tiers with no frames are omitted."""
     out: dict[str, list[Path]] = {}
-    for kind, dir_fn in _CALIB_TIERS:
-        d = dir_fn(target)
-        if not d.is_dir():
-            continue
-        frames = sorted(f for f in d.iterdir()
-                        if f.is_file() and config.is_fits_file(f.name))
+    for kind, _dir_fn in _CALIB_TIERS:
+        frames = sorted(Path(r.origin)
+                        for r in content.list_target_tier(target, kind)
+                        if config.is_fits_file(r.name))
         if frames:
             out[kind] = frames
     return out
@@ -869,7 +870,10 @@ def apply_prep(plan: PrepPlan, progress=None, should_cancel=None,
         if dp.exists():
             skipped += 1
         else:
-            _link_or_copy(src, dst)
+            # Hardlinked when the frame is ours, **copied** when it is a
+            # referenced original out on the telescope — a hardlink there would
+            # let a workflow write to the user's own file.
+            roundtrip.link_sandbox_input(src, dst)
             linked += 1
         if progress:
             progress(i, total)
@@ -1263,8 +1267,9 @@ def prune_rejected(target: str) -> dict:
         return {"pruned": 0, "orphans": 0, "skipped": True}
 
     rdir = config.rejected_dir(target)
-    rejected = ({f.name for f in rdir.iterdir() if f.is_file()}
-                if rdir.is_dir() else set())
+    # The rejected sub's *name* — managed or referenced, the name is what the
+    # sandbox link carries.
+    rejected = {r.name for r in content.list_target_tier(target, "rejected")}
     live = {f.name for f in _lights(target)}
     pruned = orphans = 0
     for ldir in _sandbox_lights_dirs(base):

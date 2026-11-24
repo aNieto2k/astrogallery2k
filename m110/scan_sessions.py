@@ -35,6 +35,7 @@ from pathlib import Path
 # Ported into the M110 engine: paths resolve dynamically from config (so a
 # changed data root / test monkeypatch takes effect without re-import).
 from . import config  # noqa: E402
+from . import content  # noqa: E402
 
 SKIP_DIRS = {"M42 copy", "M81 M82 orig", "Template"}
 NEW_START = date(2026, 4, 4)
@@ -49,20 +50,34 @@ PAT = re.compile(
 )
 
 
-def _session_key(path: Path) -> tuple[str, float, str] | None:
+def _origin(ref) -> str:
+    """Where a sub's bytes are.
+
+    A `content.ContentRef` carries it (the bytes are out on the telescope); a
+    plain path is its own origin (the managed case, the bytes in the store).
+    Both shapes are accepted so the helpers below work on either.
+    """
+    return getattr(ref, "origin", None) or str(ref)
+
+
+def _session_key(ref) -> tuple[str, float, str] | None:
     """(iso_date, exposure_s, filter) for one light sub — the fields a session
     row buckets on. Fast path: the Seestar/mosaic filename convention (no header
     read). Fallback: read the FITS header (``DATE-OBS``/``EXPTIME``/``FILTER``) so
     device layouts with other filename conventions (Dwarf 3, …) still produce
-    sessions. Returns None if neither yields a usable date+exposure."""
-    m = PAT.search(path.name)
+    sessions. Returns None if neither yields a usable date+exposure.
+
+    The sub is a `content.ContentRef`: its **name** is the file's (the capture
+    convention) and its **origin** is where the bytes are — inside the store or
+    out on the telescope. Only the origin is ever opened."""
+    m = PAT.search(ref.name)
     if m:
         d = m.group(4)                          # YYYYMMDD
         iso = f"{d[:4]}-{d[4:6]}-{d[6:]}"
         return iso, float(m.group(2)), m.group(3).upper()
     try:
         from astropy.io import fits
-        hdr = fits.getheader(str(path))
+        hdr = fits.getheader(_origin(ref))
         # The site's LOCAL date when the header has it (N.I.N.A. writes DATE-LOC),
         # the same convention as the Seestar filename clock above; else DATE-OBS
         # (UTC), which labels a western-hemisphere evening with tomorrow's date.
@@ -78,7 +93,7 @@ def _session_key(path: Path) -> tuple[str, float, str] | None:
         return None
 
 
-def _read_date_obs(path: Path) -> str | None:
+def _read_date_obs(ref) -> str | None:
     """One sub's ``DATE-OBS`` — the **UTC** instant it was exposed — or None.
 
     Deliberately not taken from the filename, which carries the same moment in
@@ -88,13 +103,13 @@ def _read_date_obs(path: Path) -> str | None:
     """
     try:
         from astropy.io import fits
-        obs = str(fits.getheader(str(path)).get("DATE-OBS") or "").strip()
+        obs = str(fits.getheader(_origin(ref)).get("DATE-OBS") or "").strip()
     except Exception:
         return None
     return obs or None
 
 
-def _session_bounds(files: list[Path]) -> tuple[str | None, str | None]:
+def _session_bounds(files: list) -> tuple[str | None, str | None]:
     """(first_obs, last_obs) for one session-segment, as UTC ISO strings.
 
     Reads **two** headers, not one per frame: subs within a segment are exposed
@@ -106,7 +121,7 @@ def _session_bounds(files: list[Path]) -> tuple[str | None, str | None]:
     """
     if not files:
         return None, None
-    ordered = sorted(files, key=lambda p: p.name)
+    ordered = sorted(files, key=lambda r: r.name)
     first, last = _read_date_obs(ordered[0]), _read_date_obs(ordered[-1])
     if first and last:
         return first, last
@@ -127,7 +142,7 @@ _SAMPLE_BETWEEN = 46
 _HEADER_CACHE_NAME = "session_headers.json"
 
 
-def _sample(ordered: list[Path]) -> list[Path]:
+def _sample(ordered: list) -> list:
     if len(ordered) <= _SAMPLE_BETWEEN + 2:
         return ordered
     step = (len(ordered) - 1) / (_SAMPLE_BETWEEN + 1)
@@ -136,8 +151,14 @@ def _sample(ordered: list[Path]) -> list[Path]:
 
 
 class _HeaderCache:
-    """{"<object_dir>/<file>": {"size", "telescop", "gain", "binning", "temp_c",
-    "device", "darks_applied", "capture"}}."""
+    """{"<store path of the sub>": {"size", "telescop", "gain", "binning",
+    "temp_c", "device", "darks_applied", "capture"}}.
+
+    Keyed on the sub's **logical** store path (`Images/M81/lights/x.fit`), not on
+    where its bytes happen to be: a referenced sub lives on the telescope, and
+    two targets can hold subs with the same file name — the logical path is the
+    one thing that tells them apart.
+    """
 
     def __init__(self):
         self.path = config.DERIVED_DIR / _HEADER_CACHE_NAME
@@ -148,8 +169,9 @@ class _HeaderCache:
         self.used: set[str] = set()
         self.dirty = False
 
-    def facts(self, f: Path) -> dict:
-        key = f"{f.parent.parent.name}/{f.name}"
+    def facts(self, ref) -> dict:
+        f = Path(_origin(ref))
+        key = getattr(ref, "store_path", None) or f"{f.parent.parent.name}/{f.name}"
         self.used.add(key)
         try:
             size = f.stat().st_size
@@ -200,16 +222,16 @@ def _read_capture_facts(path: Path) -> dict:
     return out
 
 
-def _capture_fields(files: list[Path], exp: float, cache: "_HeaderCache",
+def _capture_fields(files: list, exp: float, cache: "_HeaderCache",
                     libraries: dict) -> dict:
     """The per-session capture facts and, for a device that dark-subtracts on
     board, which library darks it most likely applied (calibration.applied_darks,
     rule v2, simulated over the sampled subs in capture order) and the widest gap
     between a sampled sub's temperature and the dark in use for it."""
     from . import calibration, devices
-    ordered = sorted(files, key=lambda p: p.name)        # name order = capture order
+    ordered = sorted(files, key=lambda r: r.name)     # name order = capture order
     sample = _sample(ordered)
-    facts = [cache.facts(f) for f in sample]
+    facts = [cache.facts(r) for r in sample]
     temps = [ff["temp_c"] for ff in facts if ff.get("temp_c") is not None]
     tel = next((ff["telescop"] for ff in facts if ff.get("telescop")), None)
     device = next((ff["device"] for ff in facts if ff.get("device")), None)
@@ -232,7 +254,7 @@ def _capture_fields(files: list[Path], exp: float, cache: "_HeaderCache",
     if device not in libraries:
         libraries[device] = calibration.library(device).get("darks", [])
     used = calibration.applied_darks(
-        [(f.name, ff.get("temp_c")) for f, ff in zip(sample, facts)],
+        [(r.name, ff.get("temp_c")) for r, ff in zip(sample, facts)],
         exptime=exp, gain=gain, binning=binning, masters=libraries[device])
     if not used or used[0] is None:
         return out
@@ -246,7 +268,7 @@ def _capture_fields(files: list[Path], exp: float, cache: "_HeaderCache",
     return out
 
 
-def _device_of(subs: list[Path], cache: "_HeaderCache"):
+def _device_of(subs: list, cache: "_HeaderCache"):
     """A function giving each sub of one target folder its (device key, capture
     profile id). A folder is almost always one telescope's, shot one way, so a
     bounded sample decides: if every sampled sub agrees, the whole folder is that
@@ -254,19 +276,19 @@ def _device_of(subs: list[Path], cache: "_HeaderCache"):
     sub's header get read (once — `_HeaderCache` keeps it)."""
     from . import devices
 
-    def key_of(f: Path) -> tuple[str, str]:
-        ff = cache.facts(f)
+    def key_of(ref) -> tuple[str, str]:
+        ff = cache.facts(ref)
         return (ff.get("device") or devices.folder_name(ff.get("telescop")),
                 ff.get("capture") or "generic")
 
-    seen = {key_of(f) for f in _sample(subs)}
+    seen = {key_of(r) for r in _sample(subs)}
     if len(seen) <= 1:
         only = next(iter(seen), (devices.UNKNOWN, "generic"))
-        return lambda f: only
+        return lambda r: only
     return key_of
 
 
-def _read_eqmode(path: Path) -> bool | None:
+def _read_eqmode(ref) -> bool | None:
     """Reported mount mode from the FITS ``EQMODE`` card: ``True`` (Equatorial) /
     ``False`` (Alt-Az), or ``None`` when unreadable or absent. **Both** the Seestar
     and the DwarfLab Dwarf 3 write ``EQMODE`` (int ``0``/``1``, comment "Equatorial
@@ -274,7 +296,7 @@ def _read_eqmode(path: Path) -> bool | None:
     predating the card (verified absent on some Dec-2025 Dwarf subs)."""
     try:
         from astropy.io import fits
-        val = fits.getheader(str(path)).get("EQMODE")
+        val = fits.getheader(_origin(ref)).get("EQMODE")
     except Exception:
         return None
     if isinstance(val, bool):
@@ -290,13 +312,13 @@ def _read_eqmode(path: Path) -> bool | None:
     return None
 
 
-def _mount_mode(rep_path: Path | None, session_date: date) -> str:
+def _mount_mode(rep_ref, session_date: date) -> str:
     """Mount mode for a session — the reported ``EQMODE`` header card if present
     (authoritative, device-agnostic), else the legacy date heuristic. The date rule
     (:data:`EQ_FROM`) is specific to this store's Seestar switchover: a fine last-resort
     guess for pre-``EQMODE`` data, wrong for anyone else — so header truth always wins."""
-    if rep_path is not None:
-        eq = _read_eqmode(rep_path)
+    if rep_ref is not None:
+        eq = _read_eqmode(rep_ref)
         if eq is not None:
             return "EQ" if eq else "Alt-Az"
     return "EQ" if session_date >= EQ_FROM else "Alt-Az"
@@ -462,8 +484,12 @@ def scan(checkpoint=None) -> list[dict]:
             checkpoint()
         if not obj_dir.is_dir() or obj_dir.name in SKIP_DIRS:
             continue
-        lights = obj_dir / "lights"
-        if not lights.is_dir():
+        # The target's subs, wherever their bytes are: inside the store (managed)
+        # or out on the telescope (referenced). `content` is the one authority
+        # for that list, so both kinds are scanned the same way.
+        refs = [r for r in content.list_target_tier(obj_dir.name, "lights")
+                if config.is_fits_file(r.name)]
+        if not refs:
             continue
 
         # Bucket by (iso-date, exp, filt, device) to compress to one row per
@@ -472,19 +498,18 @@ def scan(checkpoint=None) -> list[dict]:
         # `_session_key`); its device from `_device_of` (one TELESCOP for the
         # whole folder unless a sample shows two scopes shot it).
         bucket: dict[tuple, int] = defaultdict(int)
-        rep: dict[tuple, Path] = {}                      # one sub per bucket → EQMODE read
-        members: dict[tuple, list[Path]] = defaultdict(list)
-        subs = sorted(f for f in lights.iterdir()
-                      if f.is_file() and config.is_fits_file(f.name))
+        rep: dict[tuple, object] = {}                     # one sub per bucket → EQMODE read
+        members: dict[tuple, list] = defaultdict(list)
+        subs = sorted(refs, key=lambda r: r.name)
         device_of = _device_of(subs, cache)
-        for f in subs:
-            key = _session_key(f)
+        for r in subs:
+            key = _session_key(r)
             if key is None:
                 continue
-            key = (*key, *device_of(f))
+            key = (*key, *device_of(r))
             bucket[key] += 1
-            rep.setdefault(key, f)
-            members[key].append(f)
+            rep.setdefault(key, r)
+            members[key].append(r)
 
         slugs = folder_to_slugs(obj_dir.name, catalog_slugs)
         for (iso, exp, filt, device, capture), n in sorted(bucket.items()):

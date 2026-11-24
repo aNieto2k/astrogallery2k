@@ -51,7 +51,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import capture_profiles, config, devices
+from . import capture_profiles, config, content, devices
 from .ingest import _normalize_imagetyp, _safe_segment
 
 TIERS = config.CALIBRATION_TIERS                     # ("darks", "flats", "biases")
@@ -197,33 +197,34 @@ def _stat_key(st) -> tuple:
     return (st.st_size, st.st_mtime_ns, st.st_ino)
 
 
-def _listing(d: Path) -> list:
-    """[(name, size, mtime_ns, inode)] of the FITS files directly in `d` (what
-    `library` / `siril._calib_frames` read), sorted; [] when `d` is absent."""
-    try:
-        it = os.scandir(d)
-    except OSError:
-        return []
+def _listing(owner: str, tier: str) -> list:
+    """[(name, size, mtime_ns, inode)] of the FITS files of a tier — wherever
+    their bytes are (inside the store, or out on the device as references) —
+    sorted; [] when the tier holds nothing.
+
+    The fingerprint this feeds has to change when a frame is added, removed or
+    replaced, so it must see the referenced frames too: a tier whose contents
+    live on the telescope changes when the manifest changes.
+    """
     out = []
-    with it:
-        for e in it:
-            if not config.is_fits_file(e.name):
-                continue
-            try:
-                if e.is_file():
-                    out.append((e.name, *_stat_key(e.stat())))
-            except OSError:
-                continue
+    for ref in content.list_tier(owner, tier):
+        if not config.is_fits_file(ref.name):
+            continue
+        try:
+            st = os.stat(ref.origin)
+            out.append((ref.name, st.st_size, st.st_mtime_ns, st.st_ino))
+        except OSError:
+            out.append((ref.name, ref.size, ref.mtime_ns, 0))
     return sorted(out)
 
 
 def library_fingerprint(device: str | None) -> str:
     """A digest of what is in ``Calibration/<device>/`` — it changes when a frame
-    is added, removed or replaced, and costs one directory scan per tier."""
+    is added, removed or replaced, and costs one listing per tier."""
     if not device:
         return ""
     seg = _safe_segment(device)
-    blob = [(t, _listing(config.calibration_dir(seg, t))) for t in TIERS]
+    blob = [(t, _listing(f"Calibration/{seg}", t)) for t in TIERS]
     return hashlib.sha256(json.dumps(blob).encode()).hexdigest()
 
 
@@ -231,9 +232,8 @@ def calibration_key(target: str, device: str | None) -> str:
     """What a sandbox's calibration was matched against: the rules
     (`MATCH_RULES`), the device library, and the target's own darks/flats/biases.
     A sandbox whose manifest carries another key is due a re-match."""
-    own = [(t, _listing(fn(target))) for t, fn in
-           (("darks", config.darks_dir), ("flats", config.flats_dir),
-            ("biases", config.biases_dir))]
+    own = [(t, _listing(f"Images/{target}", t)) for t in
+           ("darks", "flats", "biases")]
     blob = {"rules": MATCH_RULES, "library": library_fingerprint(device), "target": own}
     return hashlib.sha256(json.dumps(blob, sort_keys=True).encode()).hexdigest()
 
@@ -309,14 +309,13 @@ def library(device: str) -> dict[str, list[MasterInfo]]:
 
 def _read_library(device: str) -> dict[str, list[MasterInfo]]:
     out: dict[str, list[MasterInfo]] = {}
+    seg = _safe_segment(device)
     for tier in TIERS:
-        d = config.calibration_dir(_safe_segment(device), tier)
-        if not d.is_dir():
-            continue
         masters: list[MasterInfo] = []
-        for f in sorted(d.iterdir()):
-            if not f.is_file() or not config.is_fits_file(f.name):
+        for ref in content.list_device_tier(seg, tier):
+            if not config.is_fits_file(ref.name):
                 continue
+            f = Path(ref.origin)
             facts = frame_facts(f)
             if facts is None:
                 continue
@@ -641,10 +640,8 @@ def target_facts(target: str, sample: int = 24) -> dict:
     """`facts_from_frames` over an evenly spaced sample of the target's raw subs
     (``lights/``, genuine subs only). A sample, because a target can hold
     thousands of frames and one header read per frame is the whole cost."""
-    d = config.lights_dir(target)
-    if not d.is_dir():
-        return facts_from_frames([])
-    subs = sorted(f for f in d.iterdir() if f.is_file() and config.is_light_frame(f.name))
+    subs = sorted(Path(r.origin) for r in content.list_target_tier(target, "lights")
+                  if config.is_light_frame(r.name))
     frames = [ff for ff in (frame_facts(p) for p in _sample(subs, sample)) if ff]
     return facts_from_frames(frames)
 

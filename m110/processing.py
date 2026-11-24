@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from . import astrowizard, config, siril
+from . import astrowizard, config, content, siril
 
 SETTING_KEY = "processing_workflows"
 DEFAULT_WORKFLOWS = ["siril", "astrowizard"]
@@ -134,15 +134,22 @@ def run_autoprep(targets, should_cancel=None, only_missing: bool = False) -> dic
 
 
 def _store_targets() -> list[str]:
-    """Capture targets in the store that have raw light frames."""
+    """Capture targets in the store that have raw light frames.
+
+    The frames may live outside the store (referenced originals), so the tier
+    is read through `content` — a target whose subs are all out on the
+    telescope still has to get its sandbox prepared.
+    """
     images = config.IMAGES_DIR
     if not images.is_dir():
         return []
     out = []
     for d in sorted(images.iterdir()):
-        lights = d / "lights"
-        if d.is_dir() and lights.is_dir() and any(
-                config.is_fits_file(f.name) for f in lights.iterdir() if f.is_file()):
+        if not d.is_dir():
+            continue
+        lights = [r for r in content.list_target_tier(d.name, "lights")
+                  if config.is_fits_file(r.name)]
+        if lights:
             out.append(d.name)
     return out
 
@@ -205,8 +212,13 @@ def _rejected_targets() -> list[str]:
     images = config.IMAGES_DIR
     if not images.is_dir():
         return []
-    return sorted(d.name for d in images.iterdir()
-                  if d.is_dir() and (d / "rejected").is_dir())
+    out = []
+    for d in sorted(images.iterdir()):
+        if not d.is_dir():
+            continue
+        if (d / "rejected").is_dir() or content.list_target_tier(d.name, "rejected"):
+            out.append(d.name)
+    return sorted(out)
 
 
 def reconcile_rejected(should_cancel=None) -> dict:

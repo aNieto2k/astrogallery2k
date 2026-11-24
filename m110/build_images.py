@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
-from . import config, hints, objects
+from . import config, content, hints, objects
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".fit", ".fits")
 VIEWABLE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
@@ -31,12 +32,15 @@ _INTERMEDIATE_FIT_RE = re.compile(r"_(og|crop|stretch|stretched|spcc)(_|\.)", re
 HERO_TIERS = ["finished", "stacks", "device-stacks"]
 
 
-def _is_intermediate_fit(path: Path) -> bool:
-    if path.suffix.lower() not in (".fit", ".fits"):
+def _is_intermediate_fit(name: str) -> bool:
+    """True for a processing by-product among the FITS (a stacked/cropped/
+    stretched intermediate), which the gallery does not show."""
+    p = Path(name)
+    if p.suffix.lower() not in (".fit", ".fits"):
         return False
-    if hints.is_finished_name(path.name):
+    if hints.is_finished_name(p.name):
         return False
-    return bool(_INTERMEDIATE_FIT_RE.search(path.name))
+    return bool(_INTERMEDIATE_FIT_RE.search(p.name))
 
 
 def folders_for_slug(slug: str, by_folder: dict) -> list[str]:
@@ -129,27 +133,33 @@ def make_thumb(src: Path, dest_dir: Path) -> Path | None:
 
 
 def discover_images(slug: str, folders: list[str], by_folder: dict) -> list[dict]:
+    """The displayable images of a slug's capture targets, newest first.
+
+    Each entry carries **both** paths: `path` is the real file (wherever its
+    bytes are — inside the store or out on the telescope) and `store_path` the
+    logical store path (`Images/M81/finished/x.png`) that resolves to it.
+    """
     out = []
     for fname in folders:
-        for src_dir, label in [
-            (config.finished_dir(fname), "Finished render"),
-            (config.stacks_dir(fname), "Siril stack"),
-            (config.working_files_dir(fname), "Working file"),
-            (config.device_stacks_dir(fname), config.DEVICE_STACK_LABEL),
+        for tier, label in [
+            ("finished", "Finished render"),
+            ("stacks", "Siril stack"),
+            ("working_files", "Working file"),
+            ("device-stacks", config.DEVICE_STACK_LABEL),
         ]:
-            if not src_dir.is_dir():
-                continue
-            for f in sorted(src_dir.iterdir()):
-                if (not f.is_file() or config.is_hidden_name(f.name)
-                        or f.suffix.lower() not in IMG_EXTS):
+            for ref in content.list_target_tier(fname, tier):
+                if (config.is_hidden_name(ref.name)
+                        or Path(ref.name).suffix.lower() not in IMG_EXTS):
                     continue
-                if "_thn." in f.name or _is_intermediate_fit(f):
+                if "_thn." in ref.name or _is_intermediate_fit(ref.name):
                     continue
-                st = f.stat()
                 out.append({
-                    "path": f, "name": f.name,
-                    "label": label, "size_mb": round(st.st_size / (1024 * 1024), 1),
-                    "mtime": st.st_mtime, "viewable": f.suffix.lower() in VIEWABLE_EXTS,
+                    "path": Path(ref.origin), "store_path": ref.store_path,
+                    "name": ref.name,
+                    "label": label,
+                    "size_mb": round(content.size(ref) / (1024 * 1024), 1),
+                    "mtime": content.mtime(ref),
+                    "viewable": Path(ref.name).suffix.lower() in VIEWABLE_EXTS,
                 })
     out.sort(key=lambda im: -im["mtime"])
     return out
@@ -158,10 +168,18 @@ def discover_images(slug: str, folders: list[str], by_folder: dict) -> list[dict
 # ── hero selection (tier order: Finished → FITS → Seestar; PNG > JPG, newest) ──
 
 def _photos_in(d: Path) -> list[Path]:
+    """The raster files of a directory (the ones the store holds)."""
     if not d.is_dir():
         return []
     return [f for f in d.iterdir() if f.is_file() and not config.is_hidden_name(f.name)
             and f.suffix.lower() in PHOTO_EXTS]
+
+
+def _photo_refs(refs: list) -> list[Path]:
+    """The raster candidates among a tier's items, wherever their bytes are."""
+    return [Path(r.origin) for r in refs
+            if not config.is_hidden_name(r.name)
+            and Path(r.name).suffix.lower() in PHOTO_EXTS]
 
 
 def _hero_sort_key(p: Path):
@@ -184,6 +202,7 @@ def _tier_candidates(folders: list[str]) -> list[Path]:
         cands = []
         for fname in folders:
             cands += _photos_in(tier_dir(fname))
+            cands += _photo_refs(content.list_target_tier(fname, tier))
         cands.sort(key=_hero_sort_key)
         out += cands
     return out
@@ -196,8 +215,8 @@ def find_hero_source(folders: list[str]) -> Path | None:
 
 def hero_source_path(slug: str) -> Path | None:
     """The source image the current hero was rendered from, per the hero `.src`
-    sidecar (its first line = the source path relative to the data root, recorded
-    at render time). None if there's no sidecar or the recorded source is gone.
+    sidecar (its first line = the source path, recorded at render time). None if
+    there's no sidecar or the recorded source is gone.
     Lets the UI act on the hero's *original* file, not the rendered hero JPG."""
     sidecar = config.HERO_DIR / f"{slug}.src"
     try:
@@ -206,8 +225,20 @@ def hero_source_path(slug: str) -> Path | None:
         return None
     if not first:
         return None
-    p = config.DATA_ROOT / config.upgrade_legacy_rel(first)
+    p = _resolve_recorded(first)
     return p if p.is_file() else None
+
+
+def _resolve_recorded(recorded: str) -> Path:
+    """A path recorded by the app → the file it names.
+
+    Two shapes: an **absolute** path (a source that lives outside the store —
+    a referenced original) and a **store-relative** logical path (the usual
+    case, which `content` resolves through the manifest).
+    """
+    if os.path.isabs(recorded):
+        return Path(recorded)
+    return content.resolve_path(config.upgrade_legacy_rel(recorded))
 
 
 def _hero_candidates(slug: str, folders: list[str], imgs: list[dict]) -> list[Path]:
@@ -223,7 +254,7 @@ def _hero_candidates(slug: str, folders: list[str], imgs: list[dict]) -> list[Pa
     hp = fm.get("hero_image")
     if hp:
         # A pre-v6 `hero_image:` may still name the old `seestar-stacks/` tier.
-        p = config.DATA_ROOT / config.upgrade_legacy_rel(str(hp))
+        p = _resolve_recorded(str(hp))
         if p.is_file():
             out.append(p)
     out += _tier_candidates(folders)
@@ -232,14 +263,19 @@ def _hero_candidates(slug: str, folders: list[str], imgs: list[dict]) -> list[Pa
 
 
 def _hero_identity(src: Path) -> str:
-    """Which source produced a hero: path (root-relative when possible) + content
-    hash. Changing the *chosen* source (set-hero — even to an older file) or its
-    content both change this string, so the cache invalidates on identity — not on
-    mtime ordering (an older pick used to leave a stale hero, BUGS #17)."""
+    """Which source produced a hero: path + content hash. Changing the *chosen*
+    source (set-hero — even to an older file) or its content both change this
+    string, so the cache invalidates on identity — not on mtime ordering (an
+    older pick used to leave a stale hero, BUGS #17).
+
+    The path is store-relative when the source is in the store, and **absolute**
+    when it is not (a referenced original, out on the telescope): there is no
+    store path to name, and the absolute path is the one that identifies it.
+    """
     try:
         key = str(src.relative_to(config.DATA_ROOT))
     except ValueError:
-        key = src.name
+        key = str(src)
     return f"{key}\n{img_hash(src)}"
 
 
@@ -336,7 +372,9 @@ def render_images(catalog: dict, totals: dict, slugs=None, progress=None,
             # falls back to the thumbnail render). Conflating the two is what sent
             # "Reveal in file manager" on a .fit to the renders folder.
             try:
-                src_rel = str(im["path"].relative_to(config.DATA_ROOT))
+                src_rel = im.get("store_path")
+                if not src_rel:
+                    src_rel = str(im["path"].relative_to(config.DATA_ROOT))
             except ValueError:
                 src_rel = None
             full = src_rel if im["viewable"] else None

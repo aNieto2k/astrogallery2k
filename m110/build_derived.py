@@ -21,6 +21,7 @@ from pathlib import Path
 
 # Ported into the M110 engine.
 from . import config  # noqa: E402
+from . import content  # noqa: E402
 
 try:
     import tomllib
@@ -272,7 +273,13 @@ def build_totals(catalog: dict, sessions: list[dict], registry: dict | None = No
     images = config.IMAGES_DIR
     if images.is_dir():
         for d in sorted(p for p in images.iterdir() if p.is_dir()):
-            if d.name in folder_totals or not (d / config.DEVICE_STACKS_DIRNAME).is_dir():
+            if d.name in folder_totals:
+                continue
+            # The device-stack tier may hold referenced items only (its bytes are
+            # out on the device), so the directory alone is not the signal.
+            has_stacks = ((d / config.DEVICE_STACKS_DIRNAME).is_dir()
+                          or content.list_target_tier(d.name, config.DEVICE_STACKS_DIRNAME))
+            if not has_stacks:
                 continue
             slugs = (scan_sessions.folder_to_slugs(d.name, slugset)
                      or [scan_sessions.slugify(d.name)])
@@ -378,6 +385,70 @@ def _covers_partial_target(obj_header, target: set[str],
     return bool(covers) and covers < target
 
 
+def _root_outputs(folder: Path) -> list[Path]:
+    """The processed-output files sitting directly in a target's root.
+
+    The legacy layout, where a finished render could land in `Images/<target>/`
+    itself. The tiers (`stacks/`, `finished/`) are read through `content`, so
+    they also yield the referenced items.
+    """
+    out: list[Path] = []
+    if not folder.is_dir():
+        return out
+    for f in folder.iterdir():
+        if not f.is_file() or config.is_hidden_name(f.name):
+            continue
+        if f.suffix.lower() not in PROCESSED_EXTS:
+            continue
+        out.append(f)
+    return out
+
+
+def _read_stack_candidate(stacks: list[dict], path: Path, name: str, pr: int,
+                          target: set[str], catalog_slugs, mtime: float | None = None):
+    """Read one stack candidate's header into the candidate list.
+
+    A stack is a stack because its header says so: STACKCNT (or StackingWizard's
+    NCOMBINE/WZNSUBS) and LIVETIME. A file without them is not a candidate.
+    """
+    try:
+        from astropy.io import fits
+    except ImportError:
+        return
+    try:
+        with fits.open(path) as hdul:
+            hdr = hdul[0].header
+            cnt = (hdr.get("STACKCNT") or hdr.get("NCOMBINE")
+                   or hdr.get("WZNSUBS"))
+            live = hdr.get("LIVETIME")
+            if not (cnt and live):
+                return
+            made = hdr.get("DATE")
+            if not made and hdr.get("WZFPRNT"):
+                # Its DATE-OBS is the first frame's, not the stack's. The
+                # file's own mtime is when it was written — trusted only
+                # because import preserves the source's (a copy's would lie).
+                stamp = mtime if mtime is not None else path.stat().st_mtime
+                made = datetime.fromtimestamp(
+                    stamp, timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%S")
+            stacks.append({
+                "partial": _covers_partial_target(
+                    hdr.get("OBJECT"), target, catalog_slugs),
+                "dir_priority": pr,
+                "date": made or "",
+                "mtime": (mtime if mtime is not None else path.stat().st_mtime),
+                "stack_file": name,
+                "stack_frames": int(cnt),
+                "stack_integration_min": round(float(live) / 60, 1),
+                "stack_integration_hms": fmt_hm(float(live) / 60),
+                "stack_exposure_s": float(hdr.get("EXPTIME", 0)),
+                "stacked_at": made,
+            })
+    except Exception:
+        return
+
+
 def read_latest_stack_metadata(folder: Path,
                                target_slugs: list[str] | None = None,
                                catalog_slugs: set[str] | None = None) -> dict | None:
@@ -439,6 +510,7 @@ def read_latest_stack_metadata(folder: Path,
     # last. Filename hints are for display decisions (see hints.py), not for
     # numbers.
     stacks: list[dict] = []
+    target_name = folder.name
     for d in [folder, folder / "stacks", folder / "working_files"]:
         pr = 1 if d == folder / "working_files" else 0
         if not d.is_dir():
@@ -448,39 +520,15 @@ def read_latest_stack_metadata(folder: Path,
                 continue
             if not config.is_fits_file(f.name):
                 continue
-            try:
-                with fits.open(f) as hdul:
-                    hdr = hdul[0].header
-                    # StackingWizard writes the count as NCOMBINE (and WZNSUBS)
-                    # rather than Siril's STACKCNT, and no stack DATE at all.
-                    cnt = (hdr.get("STACKCNT") or hdr.get("NCOMBINE")
-                           or hdr.get("WZNSUBS"))
-                    live = hdr.get("LIVETIME")
-                    if not (cnt and live):
-                        continue
-                    made = hdr.get("DATE")
-                    if not made and hdr.get("WZFPRNT"):
-                        # Its DATE-OBS is the first frame's, not the stack's. The
-                        # file's own mtime is when it was written — trusted only
-                        # because import preserves the source's (a copy's would lie).
-                        made = datetime.fromtimestamp(
-                            f.stat().st_mtime, timezone.utc
-                        ).strftime("%Y-%m-%dT%H:%M:%S")
-                    stacks.append({
-                        "partial": _covers_partial_target(
-                            hdr.get("OBJECT"), target, catalog_slugs),
-                        "dir_priority": pr,
-                        "date": made or "",
-                        "mtime": f.stat().st_mtime,
-                        "stack_file": f.name,
-                        "stack_frames": int(cnt),
-                        "stack_integration_min": round(float(live) / 60, 1),
-                        "stack_integration_hms": fmt_hm(float(live) / 60),
-                        "stack_exposure_s": float(hdr.get("EXPTIME", 0)),
-                        "stacked_at": made,
-                    })
-            except Exception:
+            _read_stack_candidate(stacks, f, f.name, pr, target, catalog_slugs)
+    # The referenced stacks: their bytes are outside the store, but their
+    # headers are the same and the DATE rule applies to them unchanged.
+    for tier, pr in (("stacks", 0), ("working_files", 1)):
+        for ref in content.list_target_tier(target_name, tier):
+            if not config.is_fits_file(ref.name):
                 continue
+            _read_stack_candidate(stacks, Path(ref.origin), ref.name, pr,
+                                  target, catalog_slugs, mtime=content.mtime(ref))
 
     if not stacks:
         return None
@@ -679,12 +727,9 @@ def build_processing(totals: dict, overrides: dict | None,
         if not folder.is_dir():
             continue
 
-        lights = folder / "lights"
-        light_files = []
-        if lights.is_dir():
-            light_files = [f for f in lights.iterdir()
-                           if f.is_file() and config.is_fits_file(f.name)]
-        newest_light_mtime = (max(f.stat().st_mtime for f in light_files)
+        lights = content.list_target_tier(fname, "lights")
+        light_files = [r for r in lights if config.is_fits_file(r.name)]
+        newest_light_mtime = (max(content.mtime(r) for r in light_files)
                               if light_files else 0.0)
 
         # Processed output = .fit / .tif / .tiff in the folder root OR in the
@@ -692,25 +737,15 @@ def build_processing(totals: dict, overrides: dict | None,
         # hand-finished render in finished/ (raster or FITS). Excludes anything
         # inside lights/, darks/, biases/, flats/, process/, device-stacks/.
         processed = []
-        search_dirs = [(folder, PROCESSED_EXTS)]
-        stacks_subdir = folder / "stacks"
-        if stacks_subdir.is_dir():
-            search_dirs.append((stacks_subdir, PROCESSED_EXTS))
-        finished_subdir = folder / "finished"
-        if finished_subdir.is_dir():
-            search_dirs.append((finished_subdir, FINISHED_EXTS))
-        for d, exts in search_dirs:
-            for f in d.iterdir():
-                if not f.is_file() or config.is_hidden_name(f.name):
+        for f in _root_outputs(folder):
+            processed.append({"name": f.name, "mtime": f.stat().st_mtime,
+                              "size_mb": round(f.stat().st_size / (1024 * 1024), 1)})
+        for tier, exts in (("stacks", PROCESSED_EXTS), ("finished", FINISHED_EXTS)):
+            for ref in content.list_target_tier(fname, tier):
+                if Path(ref.name).suffix.lower() not in exts:
                     continue
-                if f.suffix.lower() not in exts:
-                    continue
-                m = f.stat().st_mtime
-                processed.append({
-                    "name": f.name,
-                    "mtime": m,
-                    "size_mb": round(f.stat().st_size / (1024 * 1024), 1),
-                })
+                processed.append({"name": ref.name, "mtime": content.mtime(ref),
+                                  "size_mb": round(content.size(ref) / (1024 * 1024), 1)})
         processed.sort(key=lambda p: -p["mtime"])
         newest_processed_mtime = processed[0]["mtime"] if processed else 0.0
 
@@ -753,8 +788,8 @@ def build_processing(totals: dict, overrides: dict | None,
             new_lights = frames_after
         else:
             new_lights = (
-                sum(1 for f in light_files
-                    if f.stat().st_mtime > newest_processed_mtime)
+                sum(1 for r in light_files
+                    if content.mtime(r) > newest_processed_mtime)
                 if processed else len(light_files)
             )
 

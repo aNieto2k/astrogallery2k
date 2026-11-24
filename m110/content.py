@@ -192,8 +192,51 @@ def store_path_of(owner: str, item_path: str) -> str:
 
 
 def owner_dir(owner: str) -> Path:
-    """The absolute directory of an owner (``Images/M81`` → ``<root>/Images/M81``)."""
+    """The absolute directory of an owner (``Images/M81`` → ``<root>/Images/M81``).
+
+    Resolved through the **axis** directories (`config.IMAGES_DIR`,
+    `config.CALIBRATION_DIR`, `config.MEDIA_DIR`) rather than `DATA_ROOT` — the
+    axes are the authority for where content lives, and they are what a caller
+    (or a test) may have pointed somewhere else.
+    """
+    axis, _, rest = owner.partition("/")
+    base = _AXES.get(axis)
+    if base is not None and rest:
+        return base() / rest
     return config.DATA_ROOT / owner
+
+
+def store_path_to_path(store_path: str) -> Path:
+    """A store-relative logical path → the path it occupies inside the store."""
+    axis, _, rest = store_path.partition("/")
+    base = _AXES.get(axis)
+    if base is not None and rest:
+        return base() / rest
+    return config.DATA_ROOT / store_path
+
+
+def logical_path(path) -> str | None:
+    """The store-relative logical path of a file inside the store, or None when
+    it is not in the store at all (a referenced original, out on the device)."""
+    p = Path(path)
+    for axis, base in (("Images", config.IMAGES_DIR),
+                        ("Calibration", config.CALIBRATION_DIR),
+                        ("Media", config.MEDIA_DIR)):
+        try:
+            rel = p.relative_to(base)
+        except ValueError:
+            continue
+        return f"{axis}/{rel.as_posix()}"
+    return None
+
+
+# The three visible content axes, resolved lazily so a test (or a caller) that
+# re-points them is honoured.
+_AXES = {
+    "Images": lambda: config.IMAGES_DIR,
+    "Calibration": lambda: config.CALIBRATION_DIR,
+    "Media": lambda: config.MEDIA_DIR,
+}
 
 
 def manifest_path(owner: str) -> Path:
@@ -316,6 +359,11 @@ def _item_path(owner: str, store_path: str) -> str:
     return store_path[len(prefix):] if store_path.startswith(prefix) else store_path
 
 
+def item_path(owner: str, store_path: str) -> str:
+    """The path of an item relative to its owner (``lights/x.fit``)."""
+    return _item_path(owner, store_path)
+
+
 def add(owner: str, refs: list[ContentRef]) -> list[ContentRef]:
     """Add (or replace) items in an owner's manifest. Returns the new item list.
 
@@ -399,10 +447,10 @@ def move_to_tier(store_path: str, new_tier: str) -> bool:
     owner = owner_of(store_path)
     if move(owner, store_path, new_tier):
         return True
-    src = config.DATA_ROOT / store_path
+    src = store_path_to_path(store_path)
     if not src.is_file():
         return False
-    dest_dir = config.DATA_ROOT / owner / new_tier
+    dest_dir = owner_dir(owner) / new_tier
     dest_dir.mkdir(parents=True, exist_ok=True)
     os.replace(src, dest_dir / src.name)
     return True
@@ -557,12 +605,32 @@ def resolve_path(store_path: str) -> Path:
     for ref in load(owner):
         if ref.store_path == store_path:
             return Path(ref.origin)
-    return config.DATA_ROOT / store_path
+    return store_path_to_path(store_path)
 
 
 def resolve(ref: ContentRef) -> Path:
     """The real path of a `ContentRef`."""
     return Path(ref.origin)
+
+
+def mtime(ref: ContentRef) -> float:
+    """When the file was written (seconds since the epoch).
+
+    For a referenced item the origin's own mtime — the truth about the user's
+    file — and the value recorded at import time when the origin is gone.
+    """
+    try:
+        return Path(ref.origin).stat().st_mtime
+    except OSError:
+        return ref.mtime_ns / 1e9
+
+
+def size(ref: ContentRef) -> int:
+    """The file's size in bytes (the recorded one when the origin is gone)."""
+    try:
+        return Path(ref.origin).stat().st_size
+    except OSError:
+        return ref.size
 
 
 def is_referenced(store_path: str) -> bool:

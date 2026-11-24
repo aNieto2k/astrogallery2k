@@ -54,7 +54,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import config, hints, roundtrip
+from . import config, content, hints, roundtrip
 
 #: Sidecar written by `stacking.apply_handoff` beside the handed-off stack.
 SRC_SIDECAR_SUFFIX = ".src.json"
@@ -192,24 +192,25 @@ def lights_dir(target: str) -> Path:
 
 
 def prepare_lights(target: str, should_cancel=None) -> int:
-    """Hardlink the target's raw subs into the sandbox. Returns how many are there.
+    """Put the target's raw subs into the sandbox. Returns how many are there.
 
     Add-only and idempotent, like Siril's prep: new subs join an existing tree and
     nothing is ever removed or rewritten. Hardlinks, so a second frame tree beside
     `siril/lights/` costs directory entries and no image data — and `lights` is
     declared in `config.SANDBOX_LINKED_INPUTS`, so backup skips it rather than
-    storing every sub twice."""
-    src = config.lights_dir(target)
-    if not src.is_dir():
-        return 0
+    storing every sub twice.
+
+    A **referenced** sub (its bytes out on the telescope) is copied instead of
+    hardlinked: a hardlink would give the workflow a second name for the user's
+    own file, and a tool that writes in place would modify it."""
     dst = lights_dir(target)
     dst.mkdir(parents=True, exist_ok=True)
     n = 0
-    for f in sorted(src.iterdir()):
+    for ref in content.list_target_tier(target, "lights"):
         if should_cancel and should_cancel():
             break
-        if f.is_file() and config.is_light_frame(f.name):
-            roundtrip.link_or_copy(str(f), str(dst / f.name))
+        if config.is_light_frame(ref.name):
+            roundtrip.link_sandbox_input(ref.origin, str(dst / ref.name))
             n += 1
     return n
 

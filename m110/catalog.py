@@ -16,6 +16,7 @@ import tomllib
 import warnings
 
 from . import config
+from . import content
 
 _M = re.compile(r"^M\s*(\d+)$")
 _C = re.compile(r"^C\s*(\d+)$")
@@ -923,7 +924,14 @@ def add_captured_objects(resolve_coords: bool = True) -> list[str]:
 
     new: dict[str, dict] = {}
     for d in sorted(p for p in config.IMAGES_DIR.iterdir() if p.is_dir()):
-        if not ((d / "lights").is_dir() or (d / config.DEVICE_STACKS_DIRNAME).is_dir()):
+        # A capture target has lights or device stacks — and those may live
+        # outside the store (referenced originals), so the tiers are read
+        # through `content` and the directory alone is not the signal.
+        has_lights = ((d / "lights").is_dir()
+                      or content.list_target_tier(d.name, "lights"))
+        has_stacks = ((d / config.DEVICE_STACKS_DIRNAME).is_dir()
+                      or content.list_target_tier(d.name, config.DEVICE_STACKS_DIRNAME))
+        if not (has_lights or has_stacks):
             continue                                  # not a capture target
         folder = d.name
         members = scan_sessions.folder_to_slugs(folder, known)

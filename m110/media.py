@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config
+from . import content
 
 # Photo extensions the UI can show. `.fit`/`.fits` are included because real
 # stacked lunar/planetary results are saved as FITS beside the video they came
@@ -131,6 +132,10 @@ def list_media() -> list[MediaItem]:
     Recursive: processed output nested under a category folder is real work and
     belongs in the library. Sidecars, junk and non-media files are excluded.
     Returns `[]` when `Media/` is absent.
+
+    A media file may live outside the store (a referenced original — the video
+    is still on the telescope), so the categories are read through `content`:
+    the file is listed either way, and `MediaItem.path` points at the bytes.
     """
     root = config.MEDIA_DIR
     if not root.is_dir():
@@ -140,27 +145,23 @@ def list_media() -> list[MediaItem]:
         category = _category_of(cat_dir.name)
         if category is None:
             continue
-        for dirpath, dirnames, filenames in os.walk(cat_dir):
-            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-            here = Path(dirpath)
-            rel = here.relative_to(cat_dir)
-            subfolder = "" if rel == Path(".") else str(rel)
-            for fname in sorted(filenames):
-                if fname.startswith(".") or is_sidecar(fname) or is_junk(fname):
-                    continue
-                kind = kind_for(fname)
-                if kind is None:
-                    continue
-                f = here / fname
-                try:
-                    st = f.stat()
-                except OSError:
-                    continue
-                out.append(MediaItem(
-                    name=fname, path=f, category=category, kind=kind,
-                    size_bytes=st.st_size, mtime=st.st_mtime,
-                    captured=_captured_from_name(fname, st.st_mtime),
-                    subfolder=subfolder))
+        for ref in content.list_media_category(cat_dir.name):
+            fname = ref.name
+            if fname.startswith(".") or is_sidecar(fname) or is_junk(fname):
+                continue
+            kind = kind_for(fname)
+            if kind is None:
+                continue
+            f = Path(ref.origin)
+            mtime = content.mtime(ref)
+            rel = content.item_path(f"Media/{cat_dir.name}", ref.store_path)
+            parent = str(Path(rel).parent)
+            subfolder = "" if parent == "." else parent
+            out.append(MediaItem(
+                name=fname, path=f, category=category, kind=kind,
+                size_bytes=content.size(ref), mtime=mtime,
+                captured=_captured_from_name(fname, mtime),
+                subfolder=subfolder))
     out.sort(key=lambda i: (-i.captured, i.category.lower(), i.name.lower()))
     return out
 
@@ -257,31 +258,43 @@ def cleanup_candidates() -> list[Path]:
     returned — it is the only still that video has (see `poster_for`). An
     *orphaned* sidecar (its source file is gone) is returned, since it can no
     longer be a poster for anything.
+
+    Only the files the store **owns** are candidates: a referenced original
+    (the video is still on the telescope) belongs to the user, and M110 never
+    offers to delete something it does not own.
     """
     root = config.MEDIA_DIR
     if not root.is_dir():
         return []
     out: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-        here = Path(dirpath)
-        names = set(filenames)
-        for fname in sorted(filenames):
-            if fname.startswith("."):
-                continue
-            if is_junk(fname):
-                out.append(here / fname)
-                continue
-            if not is_sidecar(fname):
-                continue
-            stem = fname.split(SIDECAR_MARKER)[0]
-            # Which source does this sidecar belong to? If it's a video, the
-            # sidecar is the poster and must survive.
-            source_kinds = {kind_for(n) for n in names
-                            if n != fname and Path(n).stem == stem}
-            if "video" in source_kinds:
-                continue
-            out.append(here / fname)
+    for cat_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        if _category_of(cat_dir.name) is None:
+            continue
+        # The category's own files, grouped by the folder they sit in — a
+        # sidecar is only a candidate next to *its own* source.
+        by_dir: dict[Path, set[str]] = {}
+        for ref in content.list_media_category(cat_dir.name):
+            if ref.referenced:
+                continue                      # the user's own file — not ours to delete
+            by_dir.setdefault(Path(ref.origin).parent, set()).add(ref.name)
+        for here, names in sorted(by_dir.items()):
+            for fname in sorted(names):
+                if fname.startswith("."):
+                    continue
+                path = here / fname
+                if is_junk(fname):
+                    out.append(path)
+                    continue
+                if not is_sidecar(fname):
+                    continue
+                stem = fname.split(SIDECAR_MARKER)[0]
+                # Which source does this sidecar belong to? If it's a video, the
+                # sidecar is the poster and must survive.
+                source_kinds = {kind_for(n) for n in names
+                                if n != fname and Path(n).stem == stem}
+                if "video" in source_kinds:
+                    continue
+                out.append(path)
     return out
 
 

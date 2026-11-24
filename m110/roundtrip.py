@@ -37,12 +37,13 @@ import shutil
 import socket
 import sys
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import config, hints, objects
+from . import config, content, hints, objects
 
 _RASTER_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
 _FIT_EXTS = (".fit", ".fits")
@@ -78,6 +79,46 @@ def link_or_copy(src: str, dst: str) -> None:
     except OSError:
         if not os.path.exists(dst):  # linking unsupported (cross-device, …) → copy
             shutil.copyfile(src, dst)
+
+
+def link_sandbox_input(src: str, dst: str) -> None:
+    """Put a frame into a sandbox — hardlinked when the frame is **ours**,
+    copied when it is not.
+
+    The distinction is not cosmetic. A hardlink gives the sandbox a second name
+    for the same inode, so a tool that writes in place would modify the frame
+    the user owns. That is fine for a frame inside the store (the store's copy
+    is the one the tool would be working on anyway) and **not** fine for a
+    *referenced* frame, whose bytes live out on the telescope: M110 promised it
+    would never touch the user's originals, and a hardlink would break that
+    promise silently, the first time a workflow wrote to its input.
+    """
+    if _inside_store(src):
+        link_or_copy(src, dst)
+    else:
+        if not os.path.exists(dst):
+            shutil.copyfile(src, dst)
+
+
+def _inside_store(path: str) -> bool:
+    """Is this file inside the store's content tree (ours to link) or outside it
+    (the user's own, to copy)?
+
+    The test is against the **axis directories** — `Images/`, `Calibration/`,
+    `Media/` — because those are where content lives; the data root itself also
+    holds the hidden machine state, which is not content.
+    """
+    try:
+        p = Path(path).resolve()
+    except OSError:
+        return False
+    for base in (config.IMAGES_DIR, config.CALIBRATION_DIR, config.MEDIA_DIR):
+        try:
+            p.relative_to(Path(base).resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
 
 
 # ── the per-workflow descriptor ──────────────────────────────────────────────
@@ -520,6 +561,23 @@ def same_bytes(a: Path, b: Path, chunk: int = 1 << 16) -> bool:
         return False
 
 
+def _claimed_names(dest: Path) -> dict[str, Path]:
+    """The names already claimed in the tier `dest` belongs to → the real file
+    behind each.
+
+    Managed content (in the store) and referenced content (out on the
+    telescope) both count: a referenced item holds its logical name even
+    though there is no file at that path, and a new import landing on it would
+    otherwise produce two entries with one name.
+    """
+    logical = content.logical_path(dest)
+    if not logical:
+        return {}
+    owner = content.owner_of(logical)
+    tier = content.tier_of(logical)
+    return {r.name: Path(r.origin) for r in content.list_tier(owner, tier)}
+
+
 def resolve_import_dest(dest: Path, src: Path) -> tuple[Path, str]:
     """Where an incoming finished file should land — **keeping both** on a *content*
     collision rather than clobbering or silently skipping. Returns ``(path, disposition)``:
@@ -533,16 +591,21 @@ def resolve_import_dest(dest: Path, src: Path) -> tuple[Path, str]:
 
     Dedupes against **every** ``<stem>-N`` sibling, so re-running an import doesn't pile
     up ``-2``/``-3`` copies of an already-imported file. Pure read-only (no writes)."""
-    if not dest.exists():
-        return dest, "new"
+    claimed = _claimed_names(dest)
     stem, ext = dest.stem, dest.suffix
     cand, n = dest, 1
-    while cand.exists():
-        if same_bytes(src, cand):
+    while True:
+        real = claimed.get(cand.name)
+        if real is None:
+            if not cand.exists():
+                return cand, "new" if n == 1 else "renamed"
+            real = cand
+        if not real.exists():
+            return cand, "new" if n == 1 else "renamed"
+        if same_bytes(src, real):
             return cand, "duplicate"
         n += 1
         cand = dest.with_name(f"{stem}-{n}{ext}")
-    return cand, "renamed"
 
 
 # ── plan (read-only) ─────────────────────────────────────────────────────────
