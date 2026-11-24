@@ -59,7 +59,8 @@ from .slots import (DEFAULTS as SLOT_DEFAULTS, SETTING_DESTINATIONS, SLOT_CLOUD,
                     record_backup, save_slot, slot_for_destination, update_slot)
 from .storegate import restore_into_store, store_compat
 from .scope import (DEFAULT_SCOPE, SCOPE_BLURBS, SCOPE_ESSENTIALS, SCOPE_EVERYTHING,
-                    SCOPE_LABELS, SCOPES, is_excluded, iter_source_files)
+                    SCOPE_LABELS, SCOPES, is_excluded, iter_source_files,
+                    referenced_originals)
 
 # One backup at a time per process. The dialog's "Back up now" worker and the
 # window's scheduled background worker don't know about each other, and two
@@ -103,7 +104,8 @@ __all__ = [
     "backup_root_key", "create_snapshot", "detect_format", "due_for_auto_backup",
     "due_for_scheduled_backup", "format_of", "is_excluded", "iter_source_files",
     "list_snapshots", "options_from_settings", "parse_destination",
-    "preferred_format", "preview_restore", "probe_destination", "resolve_format",
+    "preferred_format", "preview_restore", "probe_destination", "referenced_originals",
+    "resolve_format",
     "restore", "restore_into_store", "snapshot_files", "store_compat", "store_backup_root", "supports_hardlinks",
     "sweep_incomplete", "sweep_objects", "verify",
 ]

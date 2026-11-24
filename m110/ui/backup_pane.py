@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from m110.ui.widgets import drain_worker, make_segment, ProgressDialog
 from m110 import backup, config
+from m110.backup import scope as backup_scope
 
 LOCAL, CLOUD = backup.SLOT_LOCAL, backup.SLOT_CLOUD
 
@@ -232,6 +233,14 @@ class _SlotPanel(QWidget):
         self._scope_note.setWordWrap(True)
         layout.addWidget(self._scope_note)
 
+        # The one thing a backup of a *referenced* library cannot do: carry the
+        # frames, because they live outside the store. Said here, in the panel
+        # where the user decides what a backup means — not in a footnote.
+        self._referenced_note = QLabel()
+        self._referenced_note.setProperty("caption", True)
+        self._referenced_note.setWordWrap(True)
+        layout.addWidget(self._referenced_note)
+
         # ── automation + retention ──
         # "&&" renders one literal ampersand: Qt reads a single "&" in a QGroupBox
         # title as a mnemonic marker, so "Automation & retention" displayed as
@@ -423,6 +432,24 @@ class _SlotPanel(QWidget):
             note += ("  Backups you already have keep their light frames until "
                      "they're pruned by the retention settings below.")
         self._scope_note.setText(note)
+        self._refresh_referenced_note()
+
+    def _refresh_referenced_note(self):
+        """Say, plainly, that a referenced library's frames are not in the
+        snapshot — the manifests are, the originals are the user's to back up."""
+        try:
+            count, size = backup_scope.referenced_originals(config.DATA_ROOT)
+        except Exception:
+            return
+        if not count:
+            self._referenced_note.setText("")
+            return
+        gb = size / (1024 ** 3)
+        amount = f"{gb:.1f} GB" if gb >= 1 else f"{size / (1024 ** 2):.0f} MB"
+        self._referenced_note.setText(
+            f"{count} file(s) ({amount}) live outside this Library and are NOT in "
+            "these backups — the links to them are. Back up those originals "
+            "yourself (the folder they are in is the one to copy).")
 
     # ---- persist on commit ----
     def _wire_commits(self):

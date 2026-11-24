@@ -45,7 +45,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import calibration, capture_profiles, config, devices, launch, roundtrip, siril as siril_mod
+from . import (calibration, capture_profiles, config, content, devices, launch,
+               roundtrip, siril as siril_mod)
 
 PRESET_NAME = siril_mod.PRESET_NAME
 
@@ -2211,11 +2212,10 @@ def _candidate_paths(target: str) -> list[tuple[str, Path]]:
     from m110 import hints
 
     found: list[tuple[str, Path]] = []
-    for tier, d in (("stacks", config.stacks_dir(target)),
-                    ("device-stacks", config.device_stacks_dir(target))):
-        if d.is_dir():
-            found += [(tier, q) for q in d.iterdir()
-                      if q.is_file() and config.is_fits_file(q.name)]
+    for tier in ("stacks", "device-stacks"):
+        for q in content.list_target_tier(target, tier):
+            if config.is_fits_file(q.name):
+                found.append((tier, Path(q.origin)))
     found += [("siril", q) for q in _sandbox_stacks(target)]
     return [(tier, q) for tier, q in found if not hints.is_intermediate_name(q.name)]
 

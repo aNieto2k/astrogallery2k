@@ -87,9 +87,12 @@ def resolve_source(slug: str, which: str, name: str | None) -> tuple[Path, dict]
 
 
 def _from_row(slug: str, row: dict) -> tuple[Path, dict]:
-    from m110 import config
+    from m110 import config, content
     rel = row.get("src") or row.get("full") or ""
-    path = Path(config.DATA_ROOT) / rel
+    # The gallery records **logical** store paths; the file they name may live
+    # outside the store (a referenced original), so it is resolved through the
+    # content layer rather than by joining the data root.
+    path = content.resolve_path(rel) if rel else Path(config.DATA_ROOT)
     if not path.is_file():
         raise ToolError(f"{row.get('name')} is listed for {slug} but missing on disk.")
     return path, _describe(slug, path, row.get("label") or "", row=row)

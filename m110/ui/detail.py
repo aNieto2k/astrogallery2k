@@ -21,8 +21,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from m110 import (build_images, config, derived, devices, integration_goals, objects,
-                  processing, refresh, siril)
+from m110 import (build_images, config, content, derived, devices, integration_goals,
+                  objects, processing, refresh, siril)
 from m110.build_derived import session_device
 from m110.ui import theme
 from m110.ui.handoff_dialog import can_hand_off
@@ -827,9 +827,12 @@ class DetailPane(QScrollArea):
             # "path" = what to *display* (the render for a FITS); "src" = the
             # actual file on disk, which Reveal/Open/Export must act on. Older
             # derived data has no "src" → fall back to the viewable path.
-            view = str(config.DATA_ROOT / full) if full else str(tp)
+            # Both are **logical** store paths: the file they name may live
+            # outside the store (a referenced original), so they are resolved
+            # through the content layer.
+            view = str(content.resolve_path(full)) if full else str(tp)
             rel_src = im.get("src")
-            src = str(config.DATA_ROOT / rel_src) if rel_src else view
+            src = str(content.resolve_path(rel_src)) if rel_src else view
             self._gallery_items.append({
                 "name": name, "path": view, "src": src,
                 "meta": _gallery_meta(slug, im),

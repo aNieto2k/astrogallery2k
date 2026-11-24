@@ -22,13 +22,23 @@ the raws stay on the drive that can hold them.
 marks from *every surviving manifest*, so frames dropped from the new scope stay
 referenced by the older, wider snapshots until retention prunes those. The
 disappearance is real but deferred — which is the window in which to warn.
+
+**Referenced originals are not in the store, so they are not in the snapshot.**
+A library can hold content by *reference* (the model `content.py` implements):
+the file stays where the user has it — on the telescope, in a folder — and the
+store keeps a manifest pointing at it. The manifest IS backed up (it is a file
+in the store), so a restore brings back the links; the frames themselves are
+the user's own to back up. `referenced_originals()` counts them so the app can
+say so out loud instead of letting the user believe their frames are safe.
 """
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 
 from .. import config
+from .. import content
 from ..roundtrip import ARCHIVE_TS_RE
 
 SCOPE_EVERYTHING = "everything"
@@ -196,3 +206,48 @@ def iter_source_files(root: Path, scope: str = DEFAULT_SCOPE) -> list[str]:
                 out.append(rf)
     out.sort()
     return out
+
+
+def referenced_originals(root: Path) -> tuple[int, int]:
+    """(count, bytes) of the originals a snapshot will **not** carry.
+
+    A referenced original lives *outside* the store — that is the whole point
+    of referencing it instead of copying it — so the backup, which copies what
+    is inside the store, does not carry it. What the snapshot *does* carry is
+    the manifest that points at it: a restore brings back the links, not the
+    frames.
+
+    So this number has to reach the user. A library whose backup silently
+    contains no frames is worse than one that never claimed to keep them.
+    """
+    count = 0
+    size = 0
+    try:
+        store = Path(root).resolve()
+    except OSError:
+        return 0, 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if content.MANIFEST_NAME not in filenames:
+            continue
+        try:
+            with open(os.path.join(dirpath, content.MANIFEST_NAME), "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError, ValueError):
+            continue
+        for item in data.get("items") or ():
+            if not isinstance(item, dict):
+                continue
+            origin = item.get("origin")
+            if not isinstance(origin, str) or not origin:
+                continue
+            try:
+                Path(origin).resolve().relative_to(store)
+                continue                     # inside the store: the snapshot has it
+            except (ValueError, OSError):
+                pass
+            count += 1
+            n = item.get("size")
+            if isinstance(n, int) and not isinstance(n, bool):
+                size += n
+    return count, size

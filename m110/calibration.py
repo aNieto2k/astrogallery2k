@@ -876,6 +876,19 @@ def dark_label(made, temp_c: float | None) -> str:
     return f"{when} · {temp}"
 
 
+def _store_rel(path: Path, ref_paths: dict[str, str]) -> str:
+    """The store-relative path of a file.
+
+    A referenced original (a master out on the device) has no position inside
+    the store — its **logical** path does: the one the manifest gives it, and
+    the one the UI resolves back to the file.
+    """
+    rel = ref_paths.get(str(path))
+    if rel:
+        return rel
+    return content.logical_path(path) or path.name
+
+
 def device_rollup(sessions: list[dict], totals: dict | None = None) -> dict:
     """``derived/devices.json``: per device — every ``Calibration/<device>/``, every
     device a session names, ``"unknown"`` only when some session has no TELESCOP —
@@ -912,6 +925,11 @@ def device_rollup(sessions: list[dict], totals: dict | None = None) -> dict:
                                   for ref in (r.get("dark_refs") or
                                               ([r["dark_ref"]] if r.get("dark_ref") else [])))
         masters = []
+        # Where each referenced original sits in the store: the logical path of a
+        # master that lives on the device, so the Devices page can point at it.
+        ref_paths = {r.origin: r.store_path
+                     for tier in TIERS
+                     for r in content.list_device_tier(dev, tier)}
         for tier, ms in sorted(library(dev).items()):
             # Raw frames (N.I.N.A.'s single darks) are listed as the SETS matching
             # uses (`candidates`), one row each, not one row per frame; a set's
@@ -931,7 +949,7 @@ def device_rollup(sessions: list[dict], totals: dict | None = None) -> dict:
                     temp = f" · {m.temp_c:g} °C" if m.temp_c is not None else ""
                     masters.append({
                         "tier": tier, "file": m.path.name,
-                        "rel": m.path.relative_to(config.DATA_ROOT).as_posix(),
+                        "rel": _store_rel(m.path, ref_paths),
                         "preview": None, "raw": True,
                         "members": [p.name for p in (m.frames or (m.path,))],
                         "exptime": m.exptime, "gain": m.gain, "binning": m.binning,
@@ -946,8 +964,8 @@ def device_rollup(sessions: list[dict], totals: dict | None = None) -> dict:
                 preview = m.path.with_suffix(".jpg")
                 masters.append({
                     "tier": tier, "file": m.path.name,
-                    "rel": m.path.relative_to(config.DATA_ROOT).as_posix(),
-                    "preview": (preview.relative_to(config.DATA_ROOT).as_posix()
+                    "rel": _store_rel(m.path, ref_paths),
+                    "preview": (_store_rel(preview, ref_paths)
                                 if preview.is_file() else None),
                     "exptime": m.exptime, "gain": m.gain, "binning": m.binning,
                     "temp_c": m.temp_c, "frames": m.ncombine,
@@ -968,8 +986,8 @@ def device_rollup(sessions: list[dict], totals: dict | None = None) -> dict:
             refs = r.get("dark_refs") or ([r["dark_ref"]] if r.get("dark_ref") else [])
             c["dark_refs"] = refs
             c["dark_labels"] = [label_of.get(n) or n for n in refs]
-            c["lights_rel"] = (config.lights_dir(r["object_dir"])
-                               .relative_to(config.DATA_ROOT).as_posix())
+            c["lights_rel"] = (content.logical_path(config.lights_dir(r["object_dir"]))
+                               or config.lights_dir(r["object_dir"]).name)
             captures.append(c)
 
         dates = sorted({r["date"] for r in caps})

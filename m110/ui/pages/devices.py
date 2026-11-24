@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from m110 import config, derived, devices, integration_goals, refresh
+from m110 import config, content, derived, devices, integration_goals, refresh
 from m110 import planning_config as pc
 from m110.planning_config import DEVICE_PRESETS
 from m110.ui import theme
@@ -696,7 +696,7 @@ class DevicesPage(QWidget):
             item.setToolTip(m.get("rel", m["file"]))
             t.setItem(r, 0, item)
             if m.get("preview"):
-                self._thumbs.request(Path(config.DATA_ROOT) / m["preview"], ROW_THUMB_SIZE,
+                self._thumbs.request(content.resolve_path(m["preview"]), ROW_THUMB_SIZE,
                                      lambda pm, it=item: _set_icon(it, pm))
             t.setItem(r, 1, _num(m.get("exptime")))
             t.setItem(r, 2, _num(m.get("gain")))
@@ -719,7 +719,9 @@ class DevicesPage(QWidget):
     def _dark_path(self, file: str) -> Path | None:
         for m in (self._current or {}).get("masters", []):
             if m["file"] == file and m.get("rel"):
-                return Path(config.DATA_ROOT) / m["rel"]
+                # The stored path is a logical store path; the master itself may
+                # live outside the store (a referenced original on the device).
+                return content.resolve_path(m["rel"])
         return None
 
     # captures ----------------------------------------------------------------
@@ -863,6 +865,6 @@ class DevicesPage(QWidget):
             if isinstance(key, tuple):
                 reveal_in_manager(self._dark_path(key[1]))
             elif key == "lights":
-                reveal_in_manager(Path(config.DATA_ROOT) / cap["lights_rel"])
+                reveal_in_manager(content.resolve_path(cap["lights_rel"]))
             elif key == "open" and cap.get("slugs"):
                 self.open_object.emit(cap["slugs"][0])
