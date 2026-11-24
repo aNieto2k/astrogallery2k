@@ -31,7 +31,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-STORE_VERSION = 6
+STORE_VERSION = 7
 INTERNAL_DIRNAME = ".m110_internal_data"
 VERSION_FILE = ".store_version"
 
@@ -173,9 +173,60 @@ def _run_steps(root: Path) -> bool:
     # v5 → v6: the device-stack tier holds Dwarf/Draco stacks too — not "seestar".
     if _rename_device_stacks(root):
         changed = True
+    # v6 → v7: content can live outside the store (referenced originals), so a
+    # tier's directory may be empty — but the store's *shape* is part of what a
+    # user navigates by. Make sure the directories are there.
+    if _ensure_tier_dirs(root):
+        changed = True
     if internal.is_dir():
         (internal / VERSION_FILE).write_text(str(STORE_VERSION), encoding="utf-8")
     return changed
+
+
+def _ensure_tier_dirs(root: Path) -> bool:
+    """v6 → v7: every tier a manifest names has its directory.
+
+    A referenced item's bytes are outside the store, so its tier directory can
+    be empty — and an empty directory is what says "M81 has lights" to a human
+    looking at the store, and to the checks that ask whether a target was
+    captured. Creating a **directory** is all this does: no file is written, no
+    file is moved, and nothing is ever deleted. Idempotent by construction —
+    the directory is only made when it is missing.
+    """
+    changed = False
+    for manifest in sorted(root.rglob("content.toml")):
+        if manifest.parent.name.startswith("."):
+            continue
+        owner = manifest.parent
+        try:
+            items = _manifest_tiers(manifest)
+        except Exception:
+            continue
+        for tier in items:
+            d = owner / tier
+            if tier and not d.exists():
+                d.mkdir(parents=True, exist_ok=True)
+                changed = True
+    return changed
+
+
+def _manifest_tiers(manifest: Path) -> set[str]:
+    """The tier directories a manifest's items live in."""
+    try:
+        import tomllib
+        with open(manifest, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return set()
+    tiers: set[str] = set()
+    for item in data.get("items") or ():
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if not isinstance(path, str) or "/" not in path:
+            continue
+        tiers.add(path.split("/", 1)[0])
+    return tiers
 
 
 # v6: the per-target device-stack tier (mirrors `config.DEVICE_STACKS_DIRNAME` /

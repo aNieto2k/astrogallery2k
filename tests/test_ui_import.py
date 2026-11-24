@@ -54,8 +54,10 @@ def test_import_page_recurses_and_populates(tmp_path, monkeypatch, qtbot):
                if "Images/M13/lights" in page.table.item(r, 6).text())
     assert page.table.item(r13, 3).text() == "2"
     assert page.table.item(r13, 1).text().startswith("M13")
-    # summary reflects copy semantics (leave the source alone)
-    assert "copy" in page._summary.text().lower()
+    # The default mode is **reference**: the files stay where they are and
+    # nothing is copied, so the summary says so.
+    assert "referenced" in page._summary.text().lower()
+    assert "nothing copied" in page._summary.text().lower()
 
 
 def _held_page(tmp_path, monkeypatch, qtbot):

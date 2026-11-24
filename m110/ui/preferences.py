@@ -245,6 +245,28 @@ class SettingsWindow(QWidget):
         self._sync_root_note()
 
         g = self._group(lay, "Import")
+        # How an imported file enters the Library: kept where it is (a link, no
+        # copy, no extra space) or copied in. The Import page can override this
+        # per row.
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Keep imported files:"))
+        self._import_mode = QComboBox()
+        for label, value in (("Where they are (no copy)", "reference"),
+                             ("Copy into the Library", "copy"),
+                             ("Ask each time", "ask")):
+            self._import_mode.addItem(label, value)
+        idx = self._import_mode.findData(ingest.import_mode())
+        if idx >= 0:
+            self._import_mode.setCurrentIndex(idx)
+        self._import_mode.currentIndexChanged.connect(
+            lambda _i: ingest.set_import_mode(self._import_mode.currentData()))
+        mode_row.addWidget(self._import_mode, 1)
+        g.addLayout(mode_row)
+        g.addWidget(_caption(
+            "“Where they are” keeps a link to the original: nothing is copied, "
+            "the Library costs no extra space, and the original is never "
+            "modified. Those files are not in the backups — only the links "
+            "are."))
         self._sub_previews_cb = QCheckBox("Import the Seestar's per-sub JPG previews")
         self._sub_previews_cb.setChecked(
             bool(config.get_setting(ingest.IMPORT_SUB_PREVIEWS_KEY, False)))

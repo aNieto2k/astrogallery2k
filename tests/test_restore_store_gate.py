@@ -47,7 +47,7 @@ def test_a_partial_restore_from_an_older_store_is_migrated(tmp_path, monkeypatch
     assert res["written"] == 1 and res["migrated"] is True
     assert current.read_bytes() == b"STACK"                 # where v6 reads it
     assert not (root / old_rel).exists()
-    assert (root / config.INTERNAL_DIRNAME / migrate.VERSION_FILE).read_text() == "6"
+    assert (root / config.INTERNAL_DIRNAME / migrate.VERSION_FILE).read_text() == str(migrate.STORE_VERSION)
 
 
 def test_without_the_gate_the_old_file_is_stranded(tmp_path, monkeypatch):
@@ -65,7 +65,7 @@ def test_a_full_restore_of_the_older_stamp_still_lands_current(tmp_path, monkeyp
     res = backup.restore_into_store(snap, [old_rel, stamp_rel], root=root,
                                     overwrite=True)
     assert res["migrated"] is True and current.is_file()
-    assert (root / stamp_rel).read_text() == "6"
+    assert (root / stamp_rel).read_text() == str(migrate.STORE_VERSION)
 
 
 def test_a_snapshot_from_a_newer_store_is_refused(tmp_path, monkeypatch):

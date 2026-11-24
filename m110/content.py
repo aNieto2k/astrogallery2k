@@ -664,6 +664,61 @@ def health_all() -> Health:
     return report
 
 
+def common_root(refs: list[ContentRef]) -> str:
+    """The deepest directory that contains every one of these origins.
+
+    The anchor for a re-link: when a telescope comes back at a different path,
+    the folder its captures lived in is the thing that moved, and this is
+    that folder.
+    """
+    dirs = [str(Path(r.origin).parent) for r in refs]
+    if not dirs:
+        return ""
+    parts = [Path(d).parts for d in dirs]
+    shared: list[str] = []
+    for i in range(min(len(p) for p in parts)):
+        head = parts[0][i]
+        if all(p[i] == head for p in parts):
+            shared.append(head)
+        else:
+            break
+    return str(Path(*shared)) if shared else ""
+
+
+def relink(old_root: str, new_root: str, owner: str | None = None) -> int:
+    """Point the referenced items under `old_root` at `new_root`.
+
+    The case: the user's telescope — or the folder they keep their captures in
+    — comes back at a different path. The bytes are the same; only the link
+    was stale. Rewriting the origins brings the library back without touching
+    a single frame.
+
+    Returns how many items were re-pointed.
+    """
+    if not old_root or not new_root:
+        return 0
+    owners = [owner] if owner else manifest_owners()
+    old = str(Path(old_root))
+    new = str(Path(new_root))
+    n = 0
+    for own in owners:
+        items = load(own)
+        if not items:
+            continue
+        changed = []
+        for ref in items:
+            origin = str(ref.origin)
+            if origin == old or origin.startswith(old + os.sep):
+                moved = Path(new) / Path(origin).relative_to(old)
+                changed.append(replace(ref, origin=str(moved)))
+                n += 1
+            else:
+                changed.append(ref)
+        if changed != items:
+            save(own, changed)
+    return n
+
+
 def manifest_owners() -> list[str]:
     """Every owner directory that has a manifest."""
     out: list[str] = []

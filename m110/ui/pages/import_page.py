@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QSplitter, QGroupBox, QStackedWidget,
 )
 
-from m110 import catalog, config, ingest
+from m110 import catalog, config, content, ingest
 from m110.ui import theme
 from m110.ui.theme import icons
 from m110.ui.ingest_dialog import (
@@ -112,9 +112,23 @@ class ImportPage(QWidget):
         self._scan_note.setWordWrap(True)
         tv.addWidget(self._scan_note)
 
-        self.table = compact_table(QTableWidget(0, 7))
+        # A referenced Library depends on files that live **elsewhere**. When one
+        # of them is not where it was, the library cannot open it — so say so,
+        # and offer to re-point the links at where the files turned up.
+        self._health_note = QLabel()
+        self._health_note.setProperty("caption", True)
+        self._health_note.setWordWrap(True)
+        self._health_btn = QPushButton("Reconnect…")
+        self._health_btn.clicked.connect(self._relink_missing)
+        health_row = QHBoxLayout()
+        health_row.addWidget(self._health_note, 1)
+        health_row.addWidget(self._health_btn)
+        tv.addLayout(health_row)
+        self._refresh_health()
+
+        self.table = compact_table(QTableWidget(0, 8))
         self.table.setHorizontalHeaderLabels(
-            ["", "Object", "Kind", "Files", "Size", "Pointing", "→ Destination"])
+            ["", "Object", "Kind", "Files", "Size", "Pointing", "→ Destination", "Store"])
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
@@ -417,6 +431,42 @@ class ImportPage(QWidget):
                 f"holding area below for manual assignment")
         self._scan_note.setText(".  ".join(bits) + ".")
 
+    # ---- referenced originals that went missing ----
+
+    def _refresh_health(self):
+        """Say which referenced originals are not where they were.
+
+        A referenced Library is only as good as the folder it points at: a
+        telescope that is not plugged in makes its captures unreachable. The
+        links survive (the manifest still names them) — but the user has to
+        know, and has to be able to re-point them when the folder comes back
+        somewhere else.
+        """
+        report = content.health_all()
+        missing = report.missing
+        self._health_btn.setVisible(bool(missing))
+        if not missing:
+            self._health_note.setText("")
+            return
+        self._health_note.setText(
+            f"{len(missing)} referenced original(s) are not where they were "
+            f"({_fmt_size(report.missing_bytes)}). The folder they live in may "
+            f"be disconnected — plug it back in, or re-point the links.")
+
+    def _relink_missing(self):
+        """Re-point the missing originals at wherever the folder turned up."""
+        report = content.health_all()
+        if not report.missing:
+            return
+        old = content.common_root(report.missing)
+        d = QFileDialog.getExistingDirectory(self, "Locate the originals", old or "")
+        if not d:
+            return
+        n = content.relink(old, d)
+        self._refresh_health()
+        if n:
+            self._summary.setText(f"{n} link(s) re-pointed to {d}.")
+
     def _on_scan_cancelled(self):
         self._finish_worker()
         self._close_progress()
@@ -450,12 +500,49 @@ class ImportPage(QWidget):
             point = g.pointing or ("—" if g.kind in NO_POINTING_KINDS else "✓")
             self.table.setItem(r, 5, QTableWidgetItem(point))
             self.table.setItem(r, 6, QTableWidgetItem(g.dest_dir))
+            self._set_store_cell(r, g)
         self._loading = False
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
         # Column 1 carries a remap combo on mis-pointed rows (#12) — measure it, or
         # it's clipped the same way the holding-area buttons were.
         fit_cell_widgets(self.table, 1)
+        fit_cell_widgets(self.table, 7)
+        self._update_summary()
+
+    def _set_store_cell(self, r, g):
+        """The per-row choice: keep the originals where they are (no copy) or
+        copy them into the library. The row's own dropdown, because the right
+        answer differs by group — a night's subs are worth referencing, a set of
+        calibration masters is small enough to keep."""
+        self.table.removeCellWidget(r, 7)
+        self.table.takeItem(r, 7)
+        if g.kind == "unassigned":
+            # The holding area always holds a real file (see ingest._emit_unassigned).
+            self.table.setItem(r, 7, QTableWidgetItem("copy"))
+            return
+        combo = QComboBox()
+        combo.addItem("reference", "reference")
+        combo.addItem("copy", "copy")
+        combo.setCurrentIndex(0 if g.references else 1)
+        combo.setToolTip(
+            "reference: the files stay where they are and M110 keeps a link to "
+            "them — no copy, no extra space, and the originals are never "
+            "touched.\ncopy: the files are copied into the Library.")
+        combo.currentIndexChanged.connect(
+            lambda _i, idx=r: self._on_store_changed(idx))
+        self.table.setCellWidget(r, 7, combo)
+
+    def _on_store_changed(self, idx):
+        """The row's store mode changed — re-plan the group and refresh what it
+        costs (referencing costs nothing; copying costs the files' size)."""
+        if self._loading:
+            return
+        combo = self.table.cellWidget(idx, 7)
+        if combo is None:
+            return
+        mode = combo.currentData() or "reference"
+        self._groups[idx] = ingest.set_group_mode(self._groups[idx], mode)
         self._update_summary()
 
     def _catalog_ids(self):
@@ -936,11 +1023,18 @@ class ImportPage(QWidget):
                  for k in ("light", "stack", "siril-stack", "dark", "flat",
                            "bias", "finished", "media", "unassigned")
                  if counts.get(k)]
-        size = _fmt_size(sum(o.size_bytes for o in ops))
+        # What the import *costs* in space: a referenced group costs nothing
+        # (the files stay where they are), a copied one costs its size.
+        copied = sum(o.size_bytes for o in ops if o.action == "copy")
+        referenced = sum(1 for o in ops if o.action == "reference")
+        size = _fmt_size(copied)
         new_objs = sorted({g.object for g in groups if g.new_object})
         extra = f"  ·  new: {', '.join(new_objs)}" if new_objs else ""
-        self._summary.setText(f"{len(ops)} file(s) · {size} to copy "
-                              f"({', '.join(parts)}){extra}")
+        how = f"{len(ops)} file(s) · {size} to copy" if copied else \
+              f"{len(ops)} file(s) · nothing copied"
+        if referenced:
+            how += f" ({referenced} referenced in place)"
+        self._summary.setText(f"{how} ({', '.join(parts)}){extra}")
         self._set_import_enabled(True)
 
     def _set_import_enabled(self, on: bool):
@@ -982,20 +1076,40 @@ class ImportPage(QWidget):
         if not ops:
             return
         n = len(ops)
-        size = _fmt_size(sum(o.size_bytes for o in ops))
+        referenced = sum(1 for o in ops if o.action == "reference")
+        copied = n - referenced
+        copied_bytes = sum(o.size_bytes for o in ops if o.action == "copy")
         new_objs = sorted({g.object for g in groups if g.new_object})
-        msg = (f"Copy {n} file(s) ({size}) into the collection?\n\n"
-               f"This writes into Images/ and cannot be undone from the app.\n"
-               f"Files are copied; the source folder is left untouched.")
+        if referenced and not copied:
+            msg = (f"Add {n} file(s) to the collection by reference?\n\n"
+                   f"The files stay exactly where they are — M110 keeps a link to "
+                   f"them and copies nothing, so the Library costs no extra space. "
+                   f"Your originals are never modified.\n\n"
+                   f"They are not in the backups: only the links are. Keep your own "
+                   f"copy of that folder.")
+            title = "Confirm import"
+        elif copied and not referenced:
+            msg = (f"Copy {n} file(s) ({_fmt_size(copied_bytes)}) into the "
+                   f"collection?\n\n"
+                   f"This writes into Images/ and cannot be undone from the app.\n"
+                   f"Files are copied; the source folder is left untouched.")
+            title = "Confirm import"
+        else:
+            msg = (f"Add {n} file(s) to the collection?\n\n"
+                   f"{referenced} by reference (kept where they are, nothing "
+                   f"copied) and {copied} copied in ({_fmt_size(copied_bytes)}).\n\n"
+                   f"The referenced files are not in the backups: only the links "
+                   f"are. Keep your own copy of that folder.")
+            title = "Confirm import"
         if new_objs:
             msg += f"\n\nNew object folder(s) will be created for: {', '.join(new_objs)}."
-        if QMessageBox.question(self, "Confirm import", msg,
+        if QMessageBox.question(self, title, msg,
                                 QMessageBox.Yes | QMessageBox.Cancel,
                                 QMessageBox.Cancel) != QMessageBox.Yes:
             return
 
         self._set_busy(True)
-        self._make_progress("Copying files…", len(ops), "Importing")
+        self._make_progress("Importing files…", len(ops), "Importing")
         self._worker = _ApplyWorker(ops, self._cancel_event, self)
         self._worker.progressed.connect(self._on_apply_progress)
         self._worker.done.connect(self._on_apply_done)
@@ -1013,11 +1127,14 @@ class ImportPage(QWidget):
         self._set_busy(False)
         moved = result.get("moved", 0)
         skipped = result.get("skipped", 0)
+        referenced = result.get("referenced", 0)
         cancelled = result.get("cancelled", False)
         resolve_preset_conflicts(self, result)
         self.imported.emit(moved)
         self.refresh_holding()      # unclassified files may have landed in Inbox/
         bits = [f"{moved} file(s) imported"]
+        if referenced:
+            bits.append(f"{referenced} referenced in place (not copied)")
         if skipped:
             bits.append(f"{skipped} already present")
         prefix = "Import cancelled — " if cancelled else ""
