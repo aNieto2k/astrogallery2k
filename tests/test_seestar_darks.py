@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
-from m110 import calibration, config, devices, ingest, siril
+from m110 import calibration, config, content, devices, ingest, siril
 from m110.stacking import Overrides, build_plan
 from tests._helpers import (mount_darklibrary, mount_seestar, seed_root,
                             seestar_master_dark)
@@ -127,11 +127,32 @@ def test_device_scan_files_the_dark_library_under_the_telescope(tmp_path, monkey
     assert group.frames == 2 and group.object == S50             # masters, not previews
     assert ingest.scan_summary(ops)["objects"] == 1              # M 72, not the scope
 
-    ingest.apply_ops(ops)
+    ingest.apply_ops(ingest.with_mode(ops, "copy"))
     lib = config.calibration_dir(S50, "darks")
     src = myworks.parent / "darklibrary" / "20s" / "MasterDark_5_20.0s_13.9C_20261015-215239.fit"
     assert (lib / src.name).read_bytes() == src.read_bytes()     # byte-identical, no stamp
     assert not any(o.kind == "cal-dark" for o in ingest.scan_seestar_plan())   # reconnect: no-op
+
+
+def test_device_scan_references_the_dark_library_by_default(tmp_path, monkeypatch):
+    """The default import mode **references** the masters: the store points at
+    the device's own dark library instead of keeping a second copy of it."""
+    seed_root(tmp_path, monkeypatch)
+    myworks, _subs = mount_seestar(tmp_path, monkeypatch, "M 72", extra=LIGHT)
+    mount_darklibrary(myworks.parent, MASTERS)
+    ops = ingest.scan_seestar_plan()
+    ingest.apply_ops(ops)
+
+    refs = content.list_device_tier(S50, "darks")
+    masters = [r for r in refs if r.name.endswith(".fit")]
+    assert len(masters) == 2                      # two masters, plus their .jpg previews
+    assert all(r.referenced for r in refs)
+    assert all(Path(r.origin).is_file() for r in refs)      # the device still has them
+    # and nothing was copied into the store
+    lib = config.calibration_dir(S50, "darks")
+    assert not (lib / "MasterDark_5_20.0s_13.9C_20261015-215239.fit").exists()
+    # reconnecting the device is a no-op: the same files are already referenced
+    assert not any(o.kind == "cal-dark" for o in ingest.scan_seestar_plan())
 
 
 def test_a_volume_without_identifiable_lights_holds_its_darks(tmp_path, monkeypatch):

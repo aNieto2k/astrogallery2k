@@ -12,7 +12,7 @@ import pathlib
 import pytest
 from astropy.io import fits
 
-from m110 import catalog, config, ingest, siril
+from m110 import catalog, config, content, ingest, siril
 
 
 def _fits_at(path, ra, dec):
@@ -308,7 +308,7 @@ def test_apply_moves_and_creates_dirs(tmp_path, monkeypatch):
 
     ops = ingest.scan_staging_plan()
     result = ingest.apply_ops(ops)
-    assert result == {"moved": 1, "skipped": 0, "cancelled": False}
+    assert result == {"moved": 1, "skipped": 0, "referenced": 0, "cancelled": False}
 
     moved_to = config.lights_dir("M81 M82") / "Light_x.fit"
     assert moved_to.is_file()
@@ -347,7 +347,7 @@ def test_no_staging_returns_empty(tmp_path, monkeypatch):
     assert ingest.scan_staging_plan() == []
 
 
-def test_seestar_plan_uses_copy_and_leaves_device(tmp_path, monkeypatch):
+def test_seestar_plan_can_copy_and_leaves_device(tmp_path, monkeypatch):
     root, _ = _make_staging(tmp_path, monkeypatch)
     # fake mounted device MyWorks with the staging layout
     myworks = tmp_path / "Volumes" / "EMMC Images" / "MyWorks"
@@ -356,15 +356,39 @@ def test_seestar_plan_uses_copy_and_leaves_device(tmp_path, monkeypatch):
     (sub / "Light_M13_a.fit").write_text("data")
     monkeypatch.setattr(config, "find_seestar_myworks", lambda: myworks)
 
-    ops = ingest.scan_seestar_plan()
+    ops = ingest.scan_seestar_plan(action="copy")
     assert len(ops) == 1
     assert ops[0].action == "copy"
     assert "Images/M13/lights/" in ops[0].dest_rel
 
     result = ingest.apply_ops(ops)
-    assert result == {"moved": 1, "skipped": 0, "cancelled": False}
+    assert result == {"moved": 1, "skipped": 0, "referenced": 0, "cancelled": False}
     # copied into collection AND still present on the "device"
     assert (config.lights_dir("M13") / "Light_M13_a.fit").is_file()
+    assert (sub / "Light_M13_a.fit").is_file()
+
+
+def test_seestar_plan_references_by_default_and_copies_nothing(tmp_path, monkeypatch):
+    """The default import mode **references** the originals: the store keeps a
+    pointer to the file on the device and not a second copy of it."""
+    root, _ = _make_staging(tmp_path, monkeypatch)
+    myworks = tmp_path / "Volumes" / "EMMC Images" / "MyWorks"
+    sub = myworks / "M 13_sub"
+    sub.mkdir(parents=True)
+    (sub / "Light_M13_a.fit").write_text("data")
+    monkeypatch.setattr(config, "find_seestar_myworks", lambda: myworks)
+
+    ops = ingest.scan_seestar_plan()
+    assert len(ops) == 1
+    assert ops[0].action == "reference"
+
+    result = ingest.apply_ops(ops)
+    assert result["referenced"] == 1 and result["moved"] == 0
+    # NOT copied into the store…
+    assert not (config.lights_dir("M13") / "Light_M13_a.fit").exists()
+    # …but the store knows where it is, and the device still has it.
+    refs = content.list_target_tier("M13", "lights")
+    assert [r.origin for r in refs] == [str(sub / "Light_M13_a.fit")]
     assert (sub / "Light_M13_a.fit").is_file()
 
 

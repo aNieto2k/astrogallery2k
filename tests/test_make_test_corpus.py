@@ -55,11 +55,13 @@ def test_generator_builds_and_verifies_a_corpus(tmp_path, capsys):
     assert (m42["telescope"], m42["filter"]) == ("Dwarf 3", "Dual-Band")
 
     # Re-match: importing the PINS night's darks re-matches M 15 at the next sync,
-    # exactly what the tester sees (TESTING.md).
+    # exactly what the tester sees (TESTING.md). The corpus is a **populated
+    # store**, so this import copies the masters in (the reference mode would
+    # point at them instead, and the library would stay empty).
     from m110 import ingest, processing
     src = tmp_path / "M110-test-import-source"
-    darks = [o for o in ingest.scan_source_plan(src) if o.kind == "cal-dark"
-             and o.layout == "nina"]
+    darks = [o for o in ingest.scan_source_plan(src, action="copy")
+             if o.kind == "cal-dark" and o.layout == "nina"]
     assert len(darks) == 4
     ingest.apply_ops(darks)
     out = processing.rematch_calibration()

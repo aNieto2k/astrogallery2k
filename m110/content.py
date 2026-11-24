@@ -157,13 +157,19 @@ def owner_of(store_path: str) -> str:
 
     ``Images/M81/lights/x.fit`` → ``Images/M81``; ``Calibration/S50/darks/y.fit``
     → ``Calibration/S50``; ``Media/Lunar_photo/z.mp4`` → ``Media/Lunar_photo``.
+    A path that *is* an owner directory (``Images/M81``) is its own owner.
+
+    The two axes with tiers (``Images``, ``Calibration``) put the owner two
+    levels down — the tier sits between the owner and the file. Media has no
+    tier: the category directory *is* the owner.
     """
     parts = store_path.split("/")
-    if len(parts) >= 3 and parts[0] in ("Images", "Calibration") \
-            and parts[2] in _tiers_for(parts[0]):
+    if parts[0] in ("Images", "Calibration") and len(parts) >= 2:
         return "/".join(parts[:2])
-    if len(parts) >= 2 and parts[0] == "Media":
-        return "/".join(parts[:2])
+    if parts[0] == "Media":
+        if len(parts) >= 3:
+            return "/".join(parts[:2])
+        return store_path
     return "/".join(parts[:-1])
 
 
@@ -375,6 +381,31 @@ def move(owner: str, store_path: str, new_tier: str) -> bool:
                      for r in load(owner)])
         return True
     return False
+
+
+def move_to_tier(store_path: str, new_tier: str) -> bool:
+    """Move a piece of content to another tier of its owner.
+
+    The operation behind "reject this sub", and it works the same for both
+    kinds of content:
+
+    * **managed** — the file moves inside the store, exactly as it always did.
+    * **referenced** — only the *record* moves. The file stays where it is and
+      is not touched, renamed or deleted: the tier is a fact about the entry,
+      not a place the bytes live.
+
+    True when something moved.
+    """
+    owner = owner_of(store_path)
+    if move(owner, store_path, new_tier):
+        return True
+    src = config.DATA_ROOT / store_path
+    if not src.is_file():
+        return False
+    dest_dir = config.DATA_ROOT / owner / new_tier
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest_dir / src.name)
+    return True
 
 
 # ── enumeration ──────────────────────────────────────────────────────────────
@@ -598,7 +629,13 @@ def free_name(owner: str, tier: str, name: str) -> str:
     with the same logical path. Mirrors `ingest._free_dest`: the original name
     is preserved and only disambiguated (``x.fit`` → ``x_1.fit``).
     """
-    taken = {r.name for r in list_tier(owner, tier)}
+    return free_name_from({r.name for r in list_tier(owner, tier)}, name)
+
+
+def free_name_from(taken: set[str], name: str) -> str:
+    """A logical name that is not in `taken` — the same rule as `free_name`,
+    against a set the caller already holds (so a whole import assigns its names
+    in one pass instead of re-reading the manifest per file)."""
     if name not in taken:
         return name
     stem, ext = os.path.splitext(name)

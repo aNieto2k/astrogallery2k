@@ -10,7 +10,7 @@ Two halves, tested separately because they fail in different ways:
 """
 from datetime import datetime
 
-from m110 import config, ingest, processing, scan_sessions, siril
+from m110 import config, content, ingest, processing, scan_sessions, siril
 
 from . import _helpers
 
@@ -43,10 +43,12 @@ def _capture(target: str, count: int = 3) -> list[str]:
 
 
 def _reject(target: str, name: str) -> None:
-    """Move a sub out of `lights/` into `rejected/` — what the user does by hand."""
-    dest = config.rejected_dir(target)
-    dest.mkdir(parents=True, exist_ok=True)
-    (config.lights_dir(target) / name).rename(dest / name)
+    """Move a sub out of `lights/` into `rejected/` — what the user does by hand.
+
+    Works for both kinds of content: a managed sub moves on disk, a referenced
+    one only changes its record (the original on the telescope is untouched).
+    """
+    assert content.move_to_tier(f"Images/{target}/lights/{name}", "rejected")
 
 
 def _sandbox_links(target: str) -> set[str]:
@@ -255,14 +257,16 @@ def test_seestar_reimport_does_not_resync_a_rejected_sub(tmp_path, monkeypatch):
     ops = ingest.scan_seestar_plan()
     target = _target_of(ops)
     ingest.apply_ops(ops)
-    assert {f.name for f in config.lights_dir(target).iterdir()} == set(names)
+    # referenced, not copied: the store lists the subs, the device still holds them
+    assert {r.name for r in content.list_target_tier(target, "lights")} == set(names)
 
     _reject(target, names[0])
     # …and the device is plugged back in, still holding every frame it captured.
     assert (myworks / "M51_sub" / names[0]).is_file()
 
     assert ingest.scan_seestar_plan() == []
-    assert not (config.lights_dir(target) / names[0]).exists()
+    assert names[0] not in {r.name for r in content.list_target_tier(target, "lights")}
+    assert names[0] in {r.name for r in content.list_target_tier(target, "rejected")}
 
 
 def test_seestar_reimport_still_brings_in_genuinely_new_subs(tmp_path, monkeypatch):

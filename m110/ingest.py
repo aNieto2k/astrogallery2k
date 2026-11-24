@@ -23,7 +23,7 @@ import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import capture_profiles, catalog, config, devices, hints, media
+from . import capture_profiles, catalog, config, content, devices, hints, media
 
 _log = logging.getLogger("m110")
 
@@ -52,7 +52,7 @@ class IngestOp:
     group: str       # source directory name
     dest_rel: str    # destination relative to the data root (for display)
     new_object: bool = False  # a new capture-target dir will be created
-    action: str = "move"      # 'move' (staging) | 'copy' (device)
+    action: str = "move"      # 'move' (staging) | 'copy' (device) | 'reference'
     size_bytes: int = 0       # source file size (stat'd on the scan worker)
     layout: str = "seestar"   # recognizer that claimed it (LAYOUTS id)
     object: str = ""          # canonical object/category label this op lands under
@@ -86,6 +86,18 @@ class IngestGroup:
     def alias_key(self) -> str:
         """What a remembered retarget is keyed on: the source name, else the folder."""
         return self.source_name or self.group
+
+    @property
+    def references(self) -> bool:
+        """True when the group will *reference* the originals instead of copying
+        them — the store grows by a manifest entry, not by the files' bytes."""
+        return any(op.action == "reference" for op in self.ops)
+
+    @property
+    def stored_bytes(self) -> int:
+        """How many bytes this group adds to the store: the files' size when they
+        are copied, **zero** when they are referenced."""
+        return 0 if self.references else self.size_bytes
 
 
 # ── layout-recognizer registry (6b) ────────────────────────────────────────────
@@ -589,6 +601,66 @@ IMPORT_SUB_PREVIEWS_KEY = "import_sub_previews"
 def _import_sub_previews() -> bool:
     return bool(config.get_setting(IMPORT_SUB_PREVIEWS_KEY, False))
 
+
+# ── how an import treats the originals ───────────────────────────────────────
+# "reference" (the default): the files stay exactly where they are and the store
+# keeps only a pointer to them (`content.py`) — no duplicated bytes, no
+# duplicated space, and the user's original is never touched.
+# "copy": today's behaviour — the files are copied into the store.
+# "ask": the import preview decides, group by group.
+#
+# This is a **global preference**, not a per-store one: it describes how the
+# user wants their telescope's files treated. It applies to **new imports
+# only** — content already in the store stays exactly where it is, and a store
+# that was filled by copying keeps working that way.
+IMPORT_MODE_KEY = "import_mode"
+IMPORT_MODES = ("reference", "copy", "ask")
+DEFAULT_IMPORT_MODE = "reference"
+
+
+def import_mode() -> str:
+    """The user's preferred import mode (`reference`, `copy` or `ask`)."""
+    mode = config.get_setting(IMPORT_MODE_KEY, DEFAULT_IMPORT_MODE)
+    return mode if mode in IMPORT_MODES else DEFAULT_IMPORT_MODE
+
+
+def set_import_mode(mode: str) -> None:
+    """Persist the import mode (the Preferences row)."""
+    if mode not in IMPORT_MODES:
+        raise ValueError(f"unknown import mode {mode!r}")
+    config.save_setting(IMPORT_MODE_KEY, mode)
+
+
+def _effective_action(action: str) -> str:
+    """The action for an **external** source: the user's import mode decides.
+
+    A **move** stays a move: the file is already inside the store (the Inbox
+    staging area), so moving it duplicates nothing. An external file is either
+    copied (the old behaviour) or referenced (the default) — never both.
+
+    "ask" resolves to "reference" here: the import preview starts from the
+    default and lets the user flip a group to "copy".
+    """
+    if action == "move":
+        return "move"
+    return "copy" if import_mode() == "copy" else "reference"
+
+
+def with_mode(ops: list[IngestOp], mode: str) -> list[IngestOp]:
+    """The same plan under a different import mode.
+
+    How the import preview offers "reference this group instead of copying
+    it": a move stays a move (the file is already ours), an external file
+    becomes a reference or a copy.
+    """
+    action = "copy" if mode == "copy" else "reference"
+    return [replace(op, action=action) if op.action != "move" else op for op in ops]
+
+
+def set_group_mode(group: IngestGroup, mode: str) -> IngestGroup:
+    """One group re-planned under a different import mode."""
+    return replace(group, ops=with_mode(group.ops, mode))
+
 # M110-store-shaped sources (6b): a subdir named like this under an <object> dir
 # (the ~/Astronomy/Images precursor: FITS/<obj>/lights, …), or an <object> dir
 # under one of these parents (Finished Images/<obj>, Seestar_stacks/<obj>).
@@ -681,18 +753,73 @@ def _emit_one_kind(src_dir: Path, files, kind: str, obj: str, group: str,
     """Route `files` into the single target subdir for `kind` (skip already-present)."""
     root = config.DATA_ROOT
     dst_dir = _KIND_DIR[kind](obj)
-    existing = (_light_tier_names(obj) if kind in _LIGHT_TIERS
-                else set(_all_files(dst_dir)))
+    if action == "reference":
+        # "Is it already here?" is answered against the **origin**, not the
+        # name: a referenced file keeps its own name in the store, so a second
+        # import of the same night has to recognise it by where it came from.
+        # The two sub tiers count as one population, exactly as they do for a
+        # managed store: a rejected sub must not come back from the telescope.
+        existing: set[str] = set()
+        tier = dst_dir.name
+        tiers = ("lights", "rejected") if kind in _LIGHT_TIERS else (tier,)
+    else:
+        referenced = set()
+        existing = (_light_tier_names(obj) if kind in _LIGHT_TIERS
+                    else set(_all_files(dst_dir)))
     new_object = kind not in _CAL_KINDS and not config.target_dir(obj).is_dir()
     ops: list[IngestOp] = []
     for f in files:
-        if f in existing:
+        src = src_dir / f
+        if action == "reference":
+            if _already_in_library(dst_dir, tiers, src):
+                continue
+        elif f in existing:
             continue
         dest = dst_dir / f
-        ops.append(IngestOp(str(src_dir / f), str(dest), kind, group,
+        ops.append(IngestOp(str(src), str(dest), kind, group,
                             str(dest.relative_to(root)), new_object, action,
-                            _size(src_dir / f), layout, obj, source_name))
+                            _size(src), layout, obj, source_name))
     return ops
+
+
+def _origin_key(path) -> str:
+    """The canonical form of a source path — how a file is recognised as *the
+    same file* across two scans (absolute, normalised, no symlink resolution:
+    the user's telescope may be mounted anywhere)."""
+    return os.path.abspath(str(path))
+
+
+def _already_in_library(dst_dir: Path, tiers: tuple[str, ...], src: Path) -> bool:
+    """Is this file already in the library?
+
+    Two ways it can be, and both have to count:
+
+    * a **reference** to the very same file — the store points at it already;
+    * a **copy** of it under the same name and size — the store holds the
+      bytes, so pointing at the original as well would give the library the
+      same night twice (in two places, one of them a duplicate of the other).
+
+    Without the second case, a store that copied a night and a later import
+    that references it would hold that night twice.
+    """
+    try:
+        rel = dst_dir.relative_to(config.DATA_ROOT).as_posix()
+    except ValueError:
+        return False
+    owner = content.owner_of(rel)
+    src_key = _origin_key(src)
+    try:
+        size = src.stat().st_size
+    except OSError:
+        size = -1
+    for tier in tiers:
+        for ref in content.list_tier(owner, tier):
+            if ref.referenced:
+                if _origin_key(ref.origin) == src_key:
+                    return True
+            elif ref.name == src.name and (size < 0 or ref.size == size):
+                return True
+    return False
 
 
 @functools.lru_cache(maxsize=512)
@@ -901,16 +1028,23 @@ def _emit_media(src_dir: Path, files, category_dir: str, obj_label: str,
     skipping ones already present. Marks them handled."""
     root = config.DATA_ROOT
     dst_dir = config.MEDIA_DIR / category_dir
-    existing = set(_all_files(dst_dir))
+    if action == "reference":
+        existing: set[str] = set()
+    else:
+        existing = set(_all_files(dst_dir))
     ops: list[IngestOp] = []
     for f in files:
         handled.add(f)
-        if f in existing:
+        src = src_dir / f
+        if action == "reference":
+            if _already_in_library(dst_dir, ("",), src):
+                continue
+        elif f in existing:
             continue
         dest = dst_dir / f
-        ops.append(IngestOp(str(src_dir / f), str(dest), "media", category_dir,
+        ops.append(IngestOp(str(src), str(dest), "media", category_dir,
                             str(dest.relative_to(root)), False, action,
-                            _size(src_dir / f), layout, obj_label))
+                            _size(src), layout, obj_label))
     return ops
 
 
@@ -1147,6 +1281,12 @@ def _emit_unassigned(src_dir: Path, files, name: str, action: str,
     root = config.DATA_ROOT
     dst_dir = config.STAGING_DIR / name
     existing = set(_all_files(dst_dir))
+    # The holding area always **holds a real file**: it is the place where M110
+    # keeps something it could not classify until the user says what it is, and
+    # the manual assign that follows *moves* that file into the content tree.
+    # A pointer could not be moved — the bytes would stay on the telescope — so
+    # the holding area keeps the copy semantics whatever the import mode is.
+    action = "move" if action == "move" else "copy"
     ops: list[IngestOp] = []
     for f in files:
         if f in existing:
@@ -1276,8 +1416,13 @@ def scan_directory_plan(root, action: str = "copy", should_cancel=None,
     **recursively** and classifies *every* directory by the layout recognizers (6b) —
     M110-store-shaped, Seestar conventions, or a raw-FITS header sort — so a nested
     layout (a per-object tree, device folders, a precursor store) is found, not just
-    the immediate children. **Copy** semantics by default, so the source is left
-    untouched. Reads only; raises IngestCancelled if `should_cancel()` turns true.
+    the immediate children.
+
+    `action` is literal — what to **do** with the files: "copy" (their bytes are
+    written into the store), "move" (they are already ours) or "reference" (they
+    stay where they are and the store keeps only a pointer to them). The source is
+    never modified either way. Reads only; raises IngestCancelled if
+    `should_cancel()` turns true.
 
     This is the **single, deterministic** scan entry point — the device/staging
     helpers below delegate to it (they used to run a shallow one-level scan, which
@@ -1445,13 +1590,16 @@ def scan_staging_plan(should_cancel=None, progress=None) -> list[IngestOp]:
     return scan_directory_plan(_staging(), "move", should_cancel, progress)
 
 
-def scan_seestar_plan(should_cancel=None, progress=None) -> list[IngestOp]:
+def scan_seestar_plan(should_cancel=None, progress=None,
+                      action: str | None = None) -> list[IngestOp]:
     """Dry-run plan for a mounted Seestar's MyWorks **and** its sibling
     ``darklibrary/`` when present (copies — leaves the device untouched). Empty if no
     Seestar is mounted. Reads only. Delegates to the recursive `scan_directory_plan`
     so nested MyWorks subfolders are found (#32 — the old shallow one-level scan
-    silently missed them)."""
-    return scan_source_plan(config.find_seestar_myworks(), "copy",
+    silently missed them).
+
+    `action` None → the user's import mode decides (reference by default)."""
+    return scan_source_plan(config.find_seestar_myworks(), action,
                             should_cancel, progress)
 
 
@@ -1472,10 +1620,14 @@ def source_scan_roots(root) -> list[Path]:
     return roots
 
 
-def scan_source_plan(root, action: str = "copy", should_cancel=None,
+def scan_source_plan(root, action: str | None = None, should_cancel=None,
                      progress=None) -> list[IngestOp]:
     """`scan_directory_plan` over every folder in `source_scan_roots(root)` — the
-    entry point for an import the user picked a folder for. Reads only."""
+    entry point for an import the user picked a folder for. Reads only.
+
+    `action` None → the user's import mode decides (reference by default: the
+    files stay where they are and the store keeps a pointer to them)."""
+    action = action or _effective_action("copy")
     ops: list[IngestOp] = []
     for r in source_scan_roots(root):
         ops += scan_directory_plan(r, action, should_cancel, progress)
@@ -1733,6 +1885,37 @@ def _free_dest(dest: str) -> str:
     return f"{stem}_{i}{ext}"
 
 
+def _reference_plan(op: IngestOp, taken: dict[tuple[str, str], set[str]],
+                    origins: dict[str, set[str]]) -> tuple[str, content.ContentRef] | None:
+    """The manifest entry a reference op becomes — or None when the store
+    already points at that exact file.
+
+    The logical name is assigned here, against the manifest *and* the tier
+    directory, so a referenced item and a managed file can never claim the same
+    name. `taken`/`origins` are the per-run caches: the question "is this name
+    taken?" is answered once per tier, not once per file.
+    """
+    root = config.DATA_ROOT
+    try:
+        rel = Path(op.dest).relative_to(root).as_posix()
+    except ValueError:
+        return None
+    owner = content.owner_of(rel)
+    tier = content.tier_of(rel)
+    origin = _origin_key(op.src)
+    known = origins.setdefault(owner, set())
+    if origin in known:
+        return None                      # the same file, already referenced
+    key = (owner, tier)
+    names = taken.setdefault(key, {r.name for r in content.list_tier(owner, tier)})
+    name = content.free_name_from(names, Path(rel).name)
+    names.add(name)
+    known.add(origin)
+    ref = content.make_ref(owner, tier, name, origin,
+                           size=op.size_bytes, source=op.layout)
+    return owner, ref
+
+
 def apply_ops(ops: list[IngestOp], progress=None, should_cancel=None) -> dict:
     """Perform the moves/copies. THIS WRITES INTO Images/ — callers must confirm.
 
@@ -1743,8 +1926,17 @@ def apply_ops(ops: list[IngestOp], progress=None, should_cancel=None) -> dict:
     `progress(i, total)` is called after each op. `should_cancel()` is checked
     before each op; cancelling stops cleanly (files already done stay done — safe,
     since a re-scan simply lists whatever's still missing).
+
+    Three actions, and the difference is the whole point of the reference model:
+
+    * **copy** — the file's bytes are written into the store.
+    * **move** — the file is already ours (the Inbox staging area); it is moved.
+    * **reference** — the file **stays where it is** and the store keeps only a
+      pointer to it (`content.py`). Nothing is copied, so the store grows by a
+      manifest entry instead of by the file's size — and the user's original is
+      never touched, renamed or deleted.
     """
-    moved = skipped = 0
+    moved = skipped = referenced = 0
     total = len(ops)
     cancelled = False
     # Hard containment guard (defense in depth over `_safe_segment`): the ONLY writer
@@ -1759,10 +1951,31 @@ def apply_ops(ops: list[IngestOp], progress=None, should_cancel=None) -> dict:
             raise ValueError(
                 f"refusing ingest op writing outside the data store: {op.dest!r}")
 
+    # Reference mode writes no file: it appends to the owner's manifest, once
+    # per owner at the end (a manifest rewrite per file would be quadratic).
+    pending: dict[str, list[content.ContentRef]] = {}
+    taken: dict[tuple[str, str], set[str]] = {}
+    origins: dict[str, set[str]] = {}
+
     for i, op in enumerate(ops, 1):
         if should_cancel and should_cancel():
             cancelled = True
             break
+        if op.action == "reference":
+            planned = _reference_plan(op, taken, origins)
+            if planned is None:
+                skipped += 1                # already referenced — a true duplicate
+            else:
+                owner, ref = planned
+                pending.setdefault(owner, []).append(ref)
+                referenced += 1
+                # The tier directory is still created: the store keeps its shape
+                # (a human can still find "the lights of M81" by looking), and
+                # the checks that ask "was this target captured?" keep working.
+                os.makedirs(os.path.dirname(op.dest), exist_ok=True)
+            if progress:
+                progress(i, total)
+            continue
         os.makedirs(os.path.dirname(op.dest), exist_ok=True)
         if os.path.exists(op.dest) and _same_content(op.src, op.dest):
             skipped += 1                    # identical bytes already present
@@ -1790,7 +2003,12 @@ def apply_ops(ops: list[IngestOp], progress=None, should_cancel=None) -> dict:
             moved += 1
         if progress:
             progress(i, total)
-    return {"moved": moved, "skipped": skipped, "cancelled": cancelled}
+    # The manifests are written once per owner, after the loop — even when the
+    # import was cancelled, so the references already made survive it.
+    for owner, refs in pending.items():
+        content.add(owner, refs)
+    return {"moved": moved, "skipped": skipped, "referenced": referenced,
+            "cancelled": cancelled}
 
 
 def plan_lights_cleanup(targets: list[str] | None = None) -> list[IngestOp]:

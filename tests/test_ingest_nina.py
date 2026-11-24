@@ -111,7 +111,7 @@ def test_imported_nina_darks_are_a_raw_set_in_the_library(tmp_path, monkeypatch)
     for n in range(4):
         nina_frame(src / "DARK" / f"d{n}.fits", imagetyp="DARK", obj=None, exp=30.0,
                    temp=5.7, date_loc="2026-11-07T05:00:00.0")
-    ingest.apply_ops(ingest.scan_source_plan(src))
+    ingest.apply_ops(ingest.scan_source_plan(src, action="copy"))
     lib = calibration.library("S50_15e7e390")["darks"]
     assert len(lib) == 4 and all(m.raw for m in lib)
     assert {m.night for m in lib} == {"2026-11-06"}           # the evening it began
@@ -123,7 +123,7 @@ def test_nina_sessions_are_the_app_device_and_not_dark_subtracted(tmp_path, monk
     seed_root(tmp_path, monkeypatch)
     src = tmp_path / "PINS"
     _night(src, "target-first")
-    ingest.apply_ops(ingest.scan_source_plan(src))
+    ingest.apply_ops(ingest.scan_source_plan(src, action="copy"))
     rows = {r["object_dir"]: r for r in scan_sessions.scan()}
     m110 = rows["M110"]
     assert m110["device"] == "S50_15e7e390" and m110["capture"] == "nina"
@@ -142,7 +142,7 @@ def test_the_devices_rollup_lists_a_raw_set_once_and_the_capture_paths(tmp_path,
     for n in range(3):                                   # a second 30 s dark
         nina_frame(src / "DARK2" / f"x{n}.fits", imagetyp="DARK", obj=None, exp=30.0,
                    temp=5.5, filt="Dark", date_loc="2026-11-07T05:10:00.0")
-    ingest.apply_ops(ingest.scan_source_plan(src))
+    ingest.apply_ops(ingest.scan_source_plan(src, action="copy"))
     scan_sessions.write_jsonl(scan_sessions.scan())
     build_derived.main()
     (dev,) = derived.load_devices()
