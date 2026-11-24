@@ -359,6 +359,21 @@ def biases_dir(name: str) -> Path:
     return IMAGES_DIR / name / "biases"
 
 
+# The tiers a capture target holds. **Not** the sandbox directories
+# (`siril/`, `astrowizard/`): a sandbox is a workflow's working area, not
+# library content — `content.py` walks these and must not descend into one.
+# `previews/` is in here: it is a per-sub JPG archive the user can keep (#25).
+CONTENT_TIERS = (
+    "lights", "rejected", "stacks", "device-stacks", "finished",
+    "previews", "working_files", "darks", "flats", "biases",
+)
+
+
+def media_dir(category: str) -> Path:
+    """``Media/<category>`` — one media category (e.g. ``Lunar_photo``)."""
+    return MEDIA_DIR / category
+
+
 # ── device-level calibration library (Calibration/<device>/<tier>) ─────────────
 # A smart telescope's calibration frames are a property of the *device*, not of
 # any one target: a smart telescope keeps master darks spanning exposure × gain ×
@@ -375,6 +390,11 @@ def calibration_dir(device: str, tier: str) -> Path:
     if tier not in CALIBRATION_TIERS:
         raise ValueError(f"unknown calibration tier {tier!r}")
     return CALIBRATION_DIR / device / tier
+
+
+def calibration_device_dir(device: str) -> Path:
+    """``Calibration/<device>`` — the device's whole calibration library."""
+    return CALIBRATION_DIR / device
 
 
 # Per-target tool-workflow sandboxes (``Images/<target>/<name>/``). Each names a
